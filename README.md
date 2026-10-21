@@ -4,8 +4,7 @@ Your AI agent builds exactly what you asked for, and proves it.
 
 ![The Briefproof pane: waiting for your answers, three agents at work, and the finished run with the token chart](docs/hero.png)
 
-<!-- video: edit this README on github.com and drag briefproof-explainer.mp4 onto this line;
-     GitHub hosts it outside the repo and the link it inserts plays inline. Then delete this comment. -->
+https://github.com/user-attachments/assets/89693ac5-fee5-433d-8874-d70fb84f8a7f
 
 ## Why I built this
 
