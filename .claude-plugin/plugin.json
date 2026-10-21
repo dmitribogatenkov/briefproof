@@ -1,0 +1,118 @@
+{
+  "name": "briefproof",
+  "version": "0.7.0",
+  "description": "Describe what to build in plain words; get a working, verified project. Live pane with a capybara per stage, pause, requirements you can steer, and a model per stage to control cost. Run /briefproof:build in Claude Code.",
+  "author": {
+    "name": "Dmitri Bogatenkov"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/dmitribogatenkov/briefproof",
+  "repository": "https://github.com/dmitribogatenkov/briefproof",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "preflight": {
+      "type": "string",
+      "title": "Preflight model",
+      "description": "Copies the brief, sets up the repo. 'session' = the model this session runs on.",
+      "options": [
+        "session",
+        "fable",
+        "opus",
+        "sonnet",
+        "haiku"
+      ],
+      "default": "session"
+    },
+    "manifest": {
+      "type": "string",
+      "title": "Manifest model",
+      "description": "Splits the brief into verbatim requirements. 'session' = the model this session runs on.",
+      "options": [
+        "session",
+        "fable",
+        "opus",
+        "sonnet",
+        "haiku"
+      ],
+      "default": "session"
+    },
+    "briefing": {
+      "type": "string",
+      "title": "Briefing model",
+      "description": "Finds the open questions and asks them. 'session' = the model this session runs on.",
+      "options": [
+        "session",
+        "fable",
+        "opus",
+        "sonnet",
+        "haiku"
+      ],
+      "default": "session"
+    },
+    "spec": {
+      "type": "string",
+      "title": "Spec model",
+      "description": "Writes the specification and module boundaries. 'session' = the model this session runs on.",
+      "options": [
+        "session",
+        "fable",
+        "opus",
+        "sonnet",
+        "haiku"
+      ],
+      "default": "session"
+    },
+    "plan": {
+      "type": "string",
+      "title": "Plan model",
+      "description": "Cuts the spec into tickets. 'session' = the model this session runs on.",
+      "options": [
+        "session",
+        "fable",
+        "opus",
+        "sonnet",
+        "haiku"
+      ],
+      "default": "session"
+    },
+    "build": {
+      "type": "string",
+      "title": "Build model",
+      "description": "Executors write the code, reviewers check risky tickets. 'session' = the model this session runs on.",
+      "options": [
+        "session",
+        "fable",
+        "opus",
+        "sonnet",
+        "haiku"
+      ],
+      "default": "session"
+    },
+    "accept": {
+      "type": "string",
+      "title": "Acceptance model",
+      "description": "Blind check of the finished project against the brief. 'session' = the model this session runs on.",
+      "options": [
+        "session",
+        "fable",
+        "opus",
+        "sonnet",
+        "haiku"
+      ],
+      "default": "session"
+    },
+    "done": {
+      "type": "string",
+      "title": "Done (report) model",
+      "description": "The final report and project memory. 'session' = the model this session runs on.",
+      "options": [
+        "session",
+        "fable",
+        "opus",
+        "sonnet",
+        "haiku"
+      ],
+      "default": "session"
+    }
+  }
+}

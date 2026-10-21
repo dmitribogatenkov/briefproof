@@ -1,0 +1,14 @@
+{
+  "name": "briefproof",
+  "description": "Briefproof: your AI agent builds exactly what you asked for, and proves it.",
+  "owner": {
+    "name": "Dmitri Bogatenkov"
+  },
+  "plugins": [
+    {
+      "name": "briefproof",
+      "source": "./",
+      "description": "Build a project from a plain-language brief, with a live progress pane"
+    }
+  ]
+}
