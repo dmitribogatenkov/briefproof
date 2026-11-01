@@ -1,6 +1,7 @@
 {
   "name": "briefproof",
-  "version": "0.7.0",
+  "displayName": "Briefproof",
+  "version": "0.8.0",
   "description": "Describe what to build in plain words; get a working, verified project. Live pane with a capybara per stage, pause, requirements you can steer, and a model per stage to control cost. Run /briefproof:build in Claude Code.",
   "author": {
     "name": "Dmitri Bogatenkov"
@@ -10,6 +11,18 @@
   "repository": "https://github.com/dmitribogatenkov/briefproof",
   "types": "./types/index.d.ts",
   "userConfig": {
+    "budget": {
+      "type": "number",
+      "title": "Token budget per run",
+      "description": "Total tokens a run may use before Briefproof stops starting new tickets and asks you to press Continue in the pane. 0 = no limit.",
+      "default": 0
+    },
+    "capybara": {
+      "type": "boolean",
+      "title": "Capybara",
+      "description": "Show the capybara in the pane. Off keeps the captions and everything else.",
+      "default": true
+    },
     "preflight": {
       "type": "string",
       "title": "Preflight model",
