@@ -32,7 +32,7 @@ function world(on: On) {
     const path = [...files.keys()].find(k => k.endsWith('/.briefproof/state.json'))
     return JSON.parse(files.get(path ?? '') ?? 'null')
   }
-  const brief = () => files.get([...files.keys()].find(k => k.endsWith('/.briefproof/brief.md')) ?? '') ?? ''
+  const brief = () => files.get([...files.keys()].find(k => k.endsWith('/.briefproof/1-brief/brief.md')) ?? '') ?? ''
   return { files, prompts, toasts, notices, ledger, brief }
 }
 
@@ -65,6 +65,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(w.ledger().pending).toBeUndefined()
     expect(w.ledger().log.at(-1).msg).toBe('Answers received')
     expect(w.prompts).toEqual([]) // nothing is sent on the user's behalf
+    const answers = w.files.get([...w.files.keys()].find(k => k.endsWith('/.briefproof/3-briefing/answers.md')) ?? '') ?? ''
+    expect(answers).toMatch(/\*\*Where should it run\?\*\*\n→ Vercel/) // the dialog round is kept on disk
+    expect(answers).toMatch(/Should clients pay when booking\?\*\*\n→ \(no answer recorded; suggested: No\)/)
   })
 
   test(`requirements can be dropped or added in the user's own words (${surface})`, async ($, on) => {
@@ -75,7 +78,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await call({ action: 'init', project: 'Massage booking' })
     // The brief sits beside the ledger, wherever the engine resolved it.
     const dir = [...w.files.keys()].find(k => k.endsWith('/state.json'))?.replace(/state\.json$/, '') ?? ''
-    w.files.set(`${dir}brief.md`, 'A booking page for a small massage studio.\n')
+    w.files.set(`${dir}1-brief/brief.md`, 'A booking page for a small massage studio.\n')
     await call({ action: 'add_requirements', quotes: ['clients pick a service', 'the owner gets an email'] })
     await call({ action: 'stage', stage: 'spec' })
 

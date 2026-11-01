@@ -37,6 +37,12 @@ less, was delivered.
 
 ## State and progress
 
+Everything a run writes lives under `.briefproof/`, one folder per stage, numbered
+as the pane numbers them: `1-brief/`, `2-manifest/` (the mod writes
+`requirements.md` there itself), `3-briefing/` (the mod writes `answers.md`; you
+write `decisions.md` in auto mode), `4-spec/`, `5-plan/` (tickets), `6-build/`
+(reviews), `7-acceptance/`, `8-report/`.
+
 All run state lives in `.briefproof/state.json`, written **only** through the
 `mcp__briefproof__state` tool (the plugin's own ledger: no install, no approval
 prompts). One call per event; batch where the tool allows:
@@ -84,7 +90,7 @@ report under *Assumptions*. Irreversible actions are asked in both.
 
 ### 1 · Preflight
 `init`, `git init` if needed, `.gitignore` with `.env`. Copy the brief
-verbatim (secrets redacted to `<REDACTED>`) to `.briefproof/brief.md`. The user's
+verbatim (secrets redacted to `<REDACTED>`) to `.briefproof/1-brief/brief.md`. The user's
 own brief file is never modified.
 
 ### 2 · Manifest
@@ -97,16 +103,16 @@ users are, what "done" looks like). Ask them in **one round** with the standard
 `AskUserQuestion` tool: short plain questions, 2 to 4 options each, **your pick
 listed first** (the pane shows it as the suggestion). Payment, hosting and
 accounts are settled here, never stubbed "for later". The pane mirrors the open
-dialog, so nothing else is needed to keep the user informed. New wishes from the user mid-run are appended to `brief.md` under
+dialog, so nothing else is needed to keep the user informed. New wishes from the user mid-run are appended to `1-brief/brief.md` under
 `## Additions` and added as new `R##`; the blind checker reads the brief, not
 the manifest.
 **Gate G1:** every requirement has a status other than `open`, or a recorded reason.
 
 ### 4 · Spec
-Write `.briefproof/spec.md`: behaviour, data, empty states, errors, limits; the
+Write `.briefproof/4-spec/spec.md`: behaviour, data, empty states, errors, limits; the
 brief usually describes only the happy path, so working out what happens off
 it is part of your job. Deepen what was asked; don't invent new features. Then write
-`.briefproof/interfaces.md`: module boundaries, shared types, project rules,
+`.briefproof/4-spec/interfaces.md`: module boundaries, shared types, project rules,
 **before** any ticket, so ticket 01 doesn't decide the architecture alone.
 Mark each covered requirement `in-spec`.
 **Gate G2:** spawn a fresh subagent with `prompts/coverage.md`, giving it
@@ -114,8 +120,9 @@ Mark each covered requirement `in-spec`.
 spec and re-run once. `gate G2`.
 
 ### 5 · Plan
-Write `.briefproof/tickets/NN-slug.md`: goal, the `R##` it serves, files it may
-touch, acceptance criteria, how to verify. Small and vertical; a change to a
+Write `.briefproof/5-plan/NN-slug.md`: goal, the `R##` it serves, the files and
+folders it owns (nothing else may touch them while it runs), acceptance criteria,
+how to verify. Small and vertical; a change to a
 shared thing is three tickets (add new beside old → migrate → remove old).
 Set `review: true` on the foundation ticket and anything risky (auth, money, data
 migration). One `add_tickets` call for the whole plan.
@@ -123,30 +130,48 @@ migration). One `add_tickets` call for the whole plan.
 ticket traces to one. Commit the plan.
 
 ### 6 · Build
-For each ticket in dependency order (independent ones in parallel):
-`set_ticket` running, spawn a **fresh** subagent with `prompts/executor.md`
-filled in. It returns `DONE`, `DONE_WITH_NOTES`, or `BLOCKED: <reason>`.
+Work in waves. A wave is every ticket whose dependencies are done and whose
+owned files overlap with no other ticket in the wave, at most **three** at a time.
+Spawn the whole wave in one message (one `Agent` call per ticket, all in the
+same turn) so they run in parallel; tickets that share files wait for the next
+wave. For each ticket: `set_ticket` running, then a **fresh** subagent with
+`prompts/executor.md` filled in, its prompt naming the ticket id (`T03`) in the
+first line. It returns `DONE`, `DONE_WITH_NOTES`, or `BLOCKED: <reason>`.
+The pane watches these spawns: a ticket shows as running the moment its
+subagent starts, and moves on when the subagent reports, even if you forget a
+`set_ticket`. Still call `set_ticket` done after the commit; it is the record.
 - `DONE` → if marked for review, spawn a fresh reviewer (same prompt, review section);
-  only its `BLOCKING:` lines go back for a fix, at most twice. Then one commit
-  per ticket, `set_ticket` done.
+  only its `BLOCKING:` lines go back for a fix, at most twice. Save each reviewer's
+  reply as `.briefproof/6-build/NN-slug-review.md`. Then one commit per ticket,
+  `set_ticket` done.
 - `BLOCKED` → resolve the blocker (answer, or a new ticket); never finish it
   yourself. If the build proves the spec wrong, amend the spec and `log` why;
   never retire a requirement this way.
 - Append what each finished ticket built to `interfaces.md` so later tickets see it.
 
-After the last ticket: one review of the whole branch by a fresh subagent.
+After the last ticket: one review of the whole branch by a fresh subagent; save its
+reply as `.briefproof/6-build/branch-review.md`.
+
+If the ledger or a spawn answers *Paused by the user* or *Token budget reached*,
+finish what is already running, end your turn with one line saying so, and wait.
+The user resumes from the pane; do not retry on your own.
 
 ### 7 · Acceptance
 **Gate G4:** clone the repo to a temp dir, then spawn a fresh subagent with
 `prompts/acceptance.md`, giving it *only* `brief.md` and the clone. It installs,
-runs and checks each sentence of the brief. Every gap becomes a fix ticket;
-re-check once. `gate G4`.
+runs and checks each sentence of the brief. Save its full reply, unedited, as
+`.briefproof/7-acceptance/acceptance.md` (append the re-check's reply below it). Every gap
+becomes a fix ticket; re-check once. `gate G4`.
 
 ### 8 · Report
 Compose from files re-read from disk, not from memory. In plain language:
 what was built and how to run it; requirement table (R##, quote, status);
 *Assumptions* (in auto mode); env var names still empty; anything deferred;
 the usage-by-stage table from `show`.
+Write the report to `.briefproof/8-report/report.md` first, then post the same
+text in the chat. In auto mode also write `.briefproof/3-briefing/decisions.md`:
+every choice you made instead of asking, one line each. The pane lists the stage
+folders when the run is done, with a button that opens `.briefproof/`.
 Write `AGENTS.md` (project memory: how to run, test, where things are; pointers,
 not prose) unless the user already has one. `stage done`.
 
@@ -161,5 +186,5 @@ not prose) unless the user already has one. `stage done`.
 ## Resume
 
 A bare `/briefproof:build` with an existing `.briefproof/state.json`: call `show`, re-read
-`brief.md`, `interfaces.md` and the current stage's files, then continue.
+`1-brief/brief.md`, `4-spec/interfaces.md` and the current stage's files, then continue.
 After a context compaction, do the same: re-read state, not this whole file.

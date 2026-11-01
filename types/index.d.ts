@@ -22,6 +22,10 @@ export type RunState = {
   paused?: boolean
   /** Filled in by the mod as requests complete; also in the final report. */
   usage?: Record<string, StageCost>
+  /** When each stage began and ended, by the clock; the end chart shows minutes beside tokens. */
+  timeline?: Record<string, { startedAt: number; endedAt?: number }>
+  /** The token budget from the settings, whether the run crossed it, and whether the user chose to continue anyway. */
+  budget?: { limit: number; reached?: boolean; waived?: boolean }
 }
 /** A requirement row the user opened in the pane, and what they chose for it. */
 export type ReqAction = { id: string; kind: 'defer' | 'drop' | null }
@@ -36,6 +40,8 @@ declare module 'claude-code' {
       reqAction: ReqAction | null
       /** Live token usage per stage, mirrored into the ledger file on each write. */
       cost: Record<string, StageCost>
+      /** True from session start until the agent touches the ledger: an existing run is interrupted, offer Resume. */
+      fresh: boolean
     }
   }
 }

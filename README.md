@@ -75,6 +75,7 @@ A few rules make this trustworthy, and I didn't bend any of them:
 | **The coordinator never writes code** | Each ticket runs in its own fresh context, so the main session stays sharp from the first question to the final report. |
 | **Boundaries come before tickets** | `interfaces.md` is written from the whole spec, so the first ticket doesn't quietly decide the architecture. |
 | **Review where it pays** | Foundation and risky tickets get a review, plus one pass over the whole branch. At most two fix rounds, so the cost stays predictable. |
+| **Tickets run in waves** | Each ticket owns its files. Tickets that don't overlap run in parallel, three at a time; the ones that share files wait their turn. |
 | **Gates the agent can't talk its way past** | The run ledger refuses to mark a gate passed while it still has a problem: an open requirement, a ticket that traces to nothing. |
 | **Safe by default** | It never asks for secret values, and always asks before deploying, paying, sending or deleting. |
 
@@ -101,10 +102,25 @@ So now there's a capybara, and it tells you.
 - **Steer requirements in your own words.** Pick a requirement to defer or drop
   it; the pane asks why, in your words, and that's what the ledger keeps. Type a
   new requirement and it lands in the brief under "Additions" and in the plan.
+- **It stays true even when the agent gets sloppy.** The mod watches the
+  subagents the agent spawns: a ticket shows as running the moment its subagent
+  starts, moves to review or done on what the subagent reports, and a `BLOCKED`
+  report is logged as such. The ledger is still the record, but the pane no
+  longer depends on the agent remembering to update it.
 - **Pause after this ticket.** The ledger refuses to start new tickets while
-  you're paused, so the agent can't run past you.
+  you're paused, and so does the spawn itself, so the agent can't run past you.
+- **A token budget, if you want one.** Set it in the settings and the pane shows
+  a bar filling towards it. When a run crosses it, no new ticket starts until
+  you press **Continue anyway**; what's already running finishes. You get a
+  notification when that happens.
+- **Resume is one click.** Open Claude Code in a folder with an unfinished run
+  and the pane says where it stopped, with a Resume button.
 - **It tells you when it needs you.** A desktop notification when questions are
   waiting, a short message as each ticket finishes.
+- **When it's done, it shows you what you got.** One line per stage folder in
+  `.briefproof/` with its file count, an **Open folder** button (Finder, Explorer,
+  or your desktop's file manager) and **Copy path**. In the terminal the names
+  are links you can Cmd-click.
 
 The status line reads `briefproof · Build · 3/7 tickets`, with `· waiting for
 you` or `· paused` when that's the case.
@@ -136,9 +152,13 @@ The split I use when I want to save:
 | Done (the report) | haiku | summarization |
 
 The pane shows the model in force and the tokens spent so far. When the run is
-done it draws a bar per stage, so you can see where the tokens went and which
-model answered. The final report carries the same table, and
-`.briefproof/state.json` keeps it under `usage`.
+done it draws a bar per stage, so you can see where the tokens went, which
+model answered, and how many minutes each stage took. The final report carries
+the same table, and `.briefproof/state.json` keeps it under `usage` and
+`timeline`.
+
+Two more settings live in the same place: **Token budget per run** (0 means no
+limit) and **Capybara** (off keeps the pane, drops the picture).
 
 ### The ledger
 
@@ -174,13 +194,25 @@ docs/                            images for this README
 
 ## What a run leaves in your project
 
+One folder per stage, numbered the way the pane numbers them:
+
 ```
-.briefproof/state.json        run state (written only by the state tool)
-.briefproof/brief.md          your words, secrets redacted; later wishes under "## Additions"
-.briefproof/spec.md           the specification
-.briefproof/interfaces.md     boundaries, shared types, what each finished ticket built
-.briefproof/tickets/NN-*.md   one per ticket
+.briefproof/
+  state.json                  the ledger (written only by the state tool)
+  1-brief/brief.md            your words, secrets redacted; later wishes under "## Additions"
+  2-manifest/requirements.md  the numbered requirements and every change to them (the mod keeps it current)
+  3-briefing/answers.md       what was asked and what you answered (the mod writes it); decisions.md in auto mode
+  4-spec/spec.md              the specification
+  4-spec/interfaces.md        boundaries, shared types, what each finished ticket built
+  5-plan/NN-*.md              one file per ticket
+  6-build/*-review.md         what the reviewers flagged, plus the branch review
+  7-acceptance/acceptance.md  the blind checker's verdict, sentence by sentence
+  8-report/report.md          the final report (also posted in the chat)
 AGENTS.md                     project memory (unless you already have one)
 ```
+
+The pane's **Open folder** button runs your OS's opener (`open` on macOS,
+`explorer` on Windows, `xdg-open` on Linux) on `.briefproof/`; that is the only
+command the mod ever runs.
 
 MIT © 2026 Dmitri Bogatenkov

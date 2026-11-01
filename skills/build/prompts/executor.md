@@ -4,11 +4,13 @@ Fill the `{…}` slots and pass the whole thing as the subagent prompt.
 
 ---
 
-You are implementing exactly one ticket in an existing project at `{repo path}`.
+Ticket {T##}: {title}. You are implementing exactly this one ticket in an existing
+project at `{repo path}`. Other tickets may be running beside you; stay inside
+the files your ticket owns.
 
 Read, in this order, and nothing else under `.briefproof/`:
-1. `.briefproof/interfaces.md`: module boundaries and project rules. Obey them.
-2. `.briefproof/tickets/{NN-slug}.md`: your ticket.
+1. `.briefproof/4-spec/interfaces.md`: module boundaries and project rules. Obey them.
+2. `.briefproof/5-plan/{NN-slug}.md`: your ticket.
 
 Rules:
 - Touch only the files the ticket allows. If you must cross a boundary, stop and
@@ -28,8 +30,8 @@ Then list: files changed, test command and result, anything added to interfaces.
 
 # Reviewer prompt (marked tickets and the final branch review)
 
-You are reviewing `{ticket or "the whole branch"}` in `{repo path}`. Read
-`.briefproof/interfaces.md` and `{the ticket file, or the git diff range}`.
+Review of {T## and title, or "the whole branch"}. You are reviewing it in `{repo path}`. Read
+`.briefproof/4-spec/interfaces.md` and `{the ticket file, or the git diff range}`.
 Check correctness, security (input validation, auth, secrets), and that the
 acceptance criteria are actually tested.
 

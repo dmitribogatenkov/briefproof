@@ -16,6 +16,7 @@ function world(on: On) {
   const files = new Map<string, string>()
   const requested: string[] = []
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('session.cwd', async () => ({ value: '/p' }))
   on('tool.register', async () => ({ value: { tool: TOOL } }))
   on('fs.exists', async (_$, e) => ({ value: files.has(e.path) }))
   on('fs.read', async (_$, e) => ({ value: files.get(e.path) ?? '' }))
