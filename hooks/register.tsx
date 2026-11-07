@@ -10,10 +10,14 @@ import type { Question, ReqAction, Requirement, RunState, StageCost, Ticket } fr
 //  3. a band above the prompt and notifications when the run is waiting for you
 const TOOL = 'mcp__briefproof__state'
 const PANE = 'briefproof'
-const FILE = '.briefproof/state.json'
-const BRIEF = '.briefproof/1-brief/brief.md'
-const REQUIREMENTS = '.briefproof/2-manifest/requirements.md'
-const ANSWERS = '.briefproof/3-briefing/answers.md'
+const ROOT = '.briefproof'
+const CURRENT = `${ROOT}/current`
+const stateFile = (dir: string) => `${dir}/state.json`
+const briefFile = (dir: string) => `${dir}/1-brief/brief.md`
+const requirementsFile = (dir: string) => `${dir}/2-manifest/requirements.md`
+const answersFile = (dir: string) => `${dir}/3-briefing/answers.md`
+const reportMd = (dir: string) => `${dir}/8-report/report.md`
+const reportHtml = (dir: string) => `${dir}/8-report/report.html`
 const POLL_MS = 2000
 const TICK_MS = 220
 const NBSP = ' '
@@ -24,6 +28,7 @@ const frame = atom({ plugin: 'briefproof', key: 'frame' } as const, 0)
 const reqAction = atom({ plugin: 'briefproof', key: 'reqAction' } as const, null)
 const cost = atom({ plugin: 'briefproof', key: 'cost' } as const, {})
 const fresh = atom({ plugin: 'briefproof', key: 'fresh' } as const, false)
+const stats = atom({ plugin: 'briefproof', key: 'stats' } as const, null)
 
 const STAGES = ['preflight', 'manifest', 'briefing', 'spec', 'plan', 'build', 'accept', 'done'] as const
 const LABELS: Record<string, string> = {
@@ -36,17 +41,18 @@ const GATES = ['G1', 'G2', 'G3', 'G4']
 const GATE_RESULTS = ['pass', 'fail', 'pending']
 const ACTIONS = [
   'init', 'stage', 'mode', 'add_requirements', 'set_requirement', 'add_tickets',
-  'set_ticket', 'gate', 'log', 'check', 'show',
+  'set_ticket', 'gate', 'log', 'check', 'show', 'budget',
 ]
 
 const DESCRIPTION = [
-  'The Briefproof run ledger: the ONLY way to create or change .briefproof/state.json',
+  'The Briefproof run ledger: the ONLY way to create or change the run state (state.json in the run folder)',
   '(never edit that file by hand). Drives the live progress pane the user watches.',
-  'Actions: init {project, mode?} · stage {stage} · mode {mode} ·',
+  'Actions: init {project, mode?} or init {kind: "change", request, mode?} on a finished run · stage {stage} · mode {mode} ·',
   'add_requirements {quotes: verbatim strings} → R01… · set_requirement {id, status, reason?} ·',
   'add_tickets {tickets: [{title, reqs, review?}]} → T01… · set_ticket {id, status} ·',
   'gate {gate: G1-G4, result: pass|fail|pending, note?} · log {message} ·',
-  'check (gate problems) · show (plain-text summary, use it to resume).',
+  'check (gate problems) · show (plain-text summary with the estimate, use it to resume) ·',
+  'budget {limit: tokens} (a budget for this run, set when the user picks one after the estimate).',
 ].join(' ')
 
 const INPUT_SCHEMA = {
@@ -55,6 +61,8 @@ const INPUT_SCHEMA = {
     action: { type: 'string', enum: ACTIONS },
     project: { type: 'string' },
     mode: { type: 'string', enum: ['ask', 'auto'] },
+    kind: { type: 'string', enum: ['build', 'change'], description: 'init only: change = a change request on the finished run in this folder' },
+    request: { type: 'string', description: 'init with kind change: the change request, verbatim' },
     stage: { type: 'string', enum: [...STAGES] },
     quotes: { type: 'array', items: { type: 'string' } },
     id: { type: 'string', description: 'R## or T##' },
@@ -76,6 +84,7 @@ const INPUT_SCHEMA = {
     result: { type: 'string', enum: GATE_RESULTS },
     note: { type: 'string' },
     message: { type: 'string' },
+    limit: { type: 'number', description: 'budget: tokens this run may use before new tickets stop; 0 removes it' },
   },
   required: ['action'],
 }
@@ -124,10 +133,12 @@ export function problems(s: RunState): string[] {
   return out
 }
 
-export function summary(s: RunState): string {
+export function summary(s: RunState, st: Stats | null = null): string {
   const done = s.tickets.filter(t => t.status === 'done').length
   const lines = [
     `${s.project} · ${LABELS[s.stage] ?? s.stage} · mode ${s.mode}${s.paused ? ' · PAUSED by the user' : ''}`,
+    `run folder: ${s.dir ?? ROOT} (write every file of this run under it)`,
+    ...(s.kind === 'change' ? [`change request on ${s.base}: "${s.request}"`] : []),
     `gates: ${GATES.map(g => `${g} ${s.gates[g] ?? 'pending'}`).join('  ')}`,
     `tickets ${done}/${s.tickets.length}`,
     ...s.tickets.map(t => `  ${t.id} [${t.status}] ${t.title} (${t.reqs.join(', ')})`),
@@ -144,6 +155,10 @@ export function summary(s: RunState): string {
     }
     lines.push(`  total: ${fmtTokens(total)} tokens`)
   }
+  if (s.tickets.length > 0 && ['plan', 'spec'].includes(s.stage)) {
+    const est = estimate(s.tickets.length, st)
+    lines.push(`estimate: about ${fmtTokens(est.tokens)} tokens and ${fmtMinutes(est.minutes * 60000)} for ${s.tickets.length} tickets (${est.basis}). In ask mode, show it to the user and ask Go / set a budget / stop before stage build.`)
+  }
   if (s.budget && s.budget.limit > 0) lines.push(`budget: ${fmtTokens(budgetSpent(s))} of ${fmtTokens(s.budget.limit)}${budgetBlocks(s) ? ' · REACHED, waiting for the user' : s.budget.waived ? ' · user chose to continue' : ''}`)
   if (s.timeline) {
     const spans = Object.entries(s.timeline).filter(([, t]) => t.endedAt).map(([k, t]) => `${LABELS[k] ?? k} ${fmtMinutes(t.endedAt! - t.startedAt)}`)
@@ -152,10 +167,12 @@ export function summary(s: RunState): string {
   return lines.join('\n')
 }
 
-export function newRun(project: string, mode: string): RunState {
+export function newRun(project: string, mode: string, change?: { base: string; request: string }): RunState {
   const now = Date.now()
   const s: RunState = {
     project, mode, stage: 'preflight',
+    kind: change ? 'change' : 'build',
+    ...(change ? { base: change.base, request: change.request } : {}),
     stages: STAGES.map(id => ({ id, label: LABELS[id] ?? id })),
     startedAt: now, updatedAt: now,
     requirements: [], tickets: [],
@@ -163,7 +180,7 @@ export function newRun(project: string, mode: string): RunState {
     log: [],
     timeline: { preflight: { startedAt: now } },
   }
-  addLog(s, `Run started · ${mode} mode`)
+  addLog(s, change ? `Change request started · ${mode} mode` : `Run started · ${mode} mode`)
   return s
 }
 
@@ -177,12 +194,23 @@ export function apply(prev: RunState | null, e: Record<string, unknown>): Outcom
     if (prev) refuse(`a run already exists here (${prev.project}, stage ${prev.stage}). Use show to resume it.`)
     const mode = str(e.mode) ?? 'ask'
     if (mode !== 'ask' && mode !== 'auto') refuse('mode is ask or auto')
+    if (str(e.kind) === 'change') {
+      const request = str(e.request) ?? refuse('a change request needs request: what to change, in the user\'s words')
+      const base = str(e.base) ?? refuse('no finished run in this folder to change; run /briefproof:build first')
+      const s = newRun(str(e.project) ?? 'Change', mode, { base, request })
+      return { next: s, reply: `Change request on "${s.project}" started in ${mode} mode. The brief in the new run folder carries the request under "## Change request"; the base run is at ${base}.`, events }
+    }
     const s = newRun(str(e.project) ?? refuse('init needs project'), mode)
     return { next: s, reply: `Run "${s.project}" started in ${mode} mode.`, events }
   }
 
   const cur = prev ?? refuse('no run in this folder yet; call init first')
-  if (action === 'show') return { next: null, reply: summary(cur), events }
+  if (action === 'show') {
+    // Live usage from this session is ahead of the file between writes; show the newer of the two.
+    const live = e.__usage as Record<string, StageCost> | undefined
+    const view = live && Object.keys(live).length > 0 ? { ...cur, usage: live } : cur
+    return { next: null, reply: summary(view, (e.__stats as Stats | null) ?? null), events }
+  }
   if (action === 'check') {
     const p = problems(cur)
     return { next: null, reply: p.length ? p.join('\n') : 'ok, no gate problems', events }
@@ -196,9 +224,11 @@ export function apply(prev: RunState | null, e: Record<string, unknown>): Outcom
       if (!(STAGES as readonly string[]).includes(stage)) refuse(`stage is one of ${STAGES.join(', ')}`)
       const now = Date.now()
       s.timeline = { ...(s.timeline ?? {}) }
-      const prevSpan = s.timeline[s.stage]
-      if (prevSpan && !prevSpan.endedAt) s.timeline[s.stage] = { ...prevSpan, endedAt: now }
-      if (!s.timeline[stage]) s.timeline[stage] = { startedAt: now }
+      if (stage !== s.stage) {
+        const prevSpan = s.timeline[s.stage]
+        if (prevSpan && !prevSpan.endedAt) s.timeline[s.stage] = { ...prevSpan, endedAt: now }
+        if (!s.timeline[stage]) s.timeline[stage] = { startedAt: now }
+      }
       s.stage = stage
       addLog(s, `Stage → ${LABELS[stage]}`)
       reply = `Stage is now ${LABELS[stage]}.`
@@ -303,6 +333,13 @@ export function apply(prev: RunState | null, e: Record<string, unknown>): Outcom
       addLog(s, str(e.message) ?? refuse('log needs message'))
       break
     }
+    case 'budget': {
+      const limit = typeof e.limit === 'number' && Number.isFinite(e.limit) ? Math.max(0, Math.round(e.limit)) : refuse('budget needs limit: a number of tokens (0 removes it)')
+      s.budget = { ...(s.budget ?? {}), limit, override: true, waived: false, reached: false }
+      addLog(s, limit > 0 ? `Budget for this run: ${fmtTokens(limit)} tokens` : 'Budget removed for this run')
+      reply = limit > 0 ? `Budget set: ${fmtTokens(limit)} tokens for this run.` : 'Budget removed for this run.'
+      break
+    }
   }
   if (s.paused) {
     reply += '\n(The user paused the run: finish the ticket in progress, then stop and wait for them to resume.)'
@@ -371,6 +408,52 @@ export function fmtMinutes(ms: number): string {
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
 }
 
+/** One finished run, as ~/.briefproof/stats.json keeps it for the estimates. */
+export type RunStat = { at: number; project: string; kind: string; tickets: number; tokens: Record<string, number>; minutes: Record<string, number> }
+export type Stats = { runs: RunStat[] }
+
+export function statOf(s: RunState): RunStat {
+  const tokens: Record<string, number> = {}
+  for (const [k, c] of Object.entries(s.usage ?? {})) tokens[k] = tokensOf(c)
+  const minutes: Record<string, number> = {}
+  for (const [k, t] of Object.entries(s.timeline ?? {})) if (t.endedAt) minutes[k] = (t.endedAt - t.startedAt) / 60000
+  return { at: Date.now(), project: s.project, kind: s.kind ?? 'build', tickets: s.tickets.length, tokens, minutes }
+}
+
+/** Tokens and minutes a build of N tickets is likely to take: from past runs when there are any, else a stated rough default. */
+export function estimate(tickets: number, st: Stats | null): { tokens: number; minutes: number; basis: string } {
+  const runs = (st?.runs ?? []).filter(r => r.kind === 'build' && r.tickets > 0 && Object.keys(r.tokens).length > 0).slice(-10)
+  if (runs.length === 0) {
+    return { tokens: 90_000 + 60_000 * tickets, minutes: 6 + 4 * tickets, basis: 'a rough default; it learns from your runs' }
+  }
+  const avg = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length
+  const perTicketTok = avg(runs.map(r => (r.tokens.build ?? 0) / r.tickets))
+  const fixedTok = avg(runs.map(r => Object.entries(r.tokens).filter(([k]) => k !== 'build').reduce((n, [, v]) => n + v, 0)))
+  const perTicketMin = avg(runs.map(r => (r.minutes.build ?? 0) / r.tickets))
+  const fixedMin = avg(runs.map(r => Object.entries(r.minutes).filter(([k]) => k !== 'build').reduce((n, [, v]) => n + v, 0)))
+  return { tokens: Math.round(fixedTok + perTicketTok * tickets), minutes: Math.round(fixedMin + perTicketMin * tickets), basis: `your last ${runs.length} run${runs.length > 1 ? 's' : ''}` }
+}
+
+async function statsPath($: EngineInterface): Promise<string | null> {
+  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+  return home ? `${home}/.briefproof/stats.json` : null
+}
+
+async function loadStats($: EngineInterface): Promise<Stats | null> {
+  const path = await statsPath($)
+  if (!path || !(await $.fs.exists(path))) return null
+  try { return JSON.parse(await $.fs.read(path)) as Stats } catch { return null }
+}
+
+async function recordStat($: EngineInterface, s: RunState): Promise<void> {
+  const path = await statsPath($)
+  if (!path) return
+  const st = (await loadStats($)) ?? { runs: [] }
+  st.runs = [...st.runs, statOf(s)].slice(-50)
+  await $.fs.write(path, `${JSON.stringify(st, null, 2)}\n`)
+  await update($, stats, () => st)
+}
+
 /** Tokens the whole run has used so far, from the usage the mod mirrors into the ledger. */
 export function budgetSpent(s: RunState): number {
   return Object.values(s.usage ?? {}).reduce((n, c) => n + tokensOf(c), 0)
@@ -434,17 +517,37 @@ async function announce($: EngineInterface, events: Event[]) {
   }
 }
 
-async function loadFile($: EngineInterface): Promise<RunState | null> {
-  if (!(await $.fs.exists(FILE))) return null
+/** Where the current run lives: `.briefproof/runs/<id>` named by `.briefproof/current`, or `.briefproof` itself for a run from before 0.9. */
+async function runDir($: EngineInterface): Promise<string | null> {
+  if (await $.fs.exists(CURRENT)) {
+    const rel = (await $.fs.read(CURRENT)).trim()
+    if (rel) return `${ROOT}/${rel}`
+  }
+  if (await $.fs.exists(stateFile(ROOT))) return ROOT
+  return null
+}
+
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'run'
+function newRunDir(project: string, now = new Date()): string {
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
+  return `${ROOT}/runs/${stamp}-${slug(project)}`
+}
+
+async function loadFile($: EngineInterface, dir?: string | null): Promise<RunState | null> {
+  const d = dir === undefined ? await runDir($) : dir
+  if (!d || !(await $.fs.exists(stateFile(d)))) return null
   try {
-    return JSON.parse(await $.fs.read(FILE)) as RunState
+    return JSON.parse(await $.fs.read(stateFile(d))) as RunState
   } catch {
-    return refuse(`${FILE} is unreadable; restore it from git rather than editing by hand`)
+    return refuse(`${stateFile(d)} is unreadable; restore it from git rather than editing by hand`)
   }
 }
 
 /** 3-briefing/answers.md: every question the dialog asked and what you answered, appended per round. */
 async function recordAnswers($: EngineInterface, questions: Question[], result: unknown): Promise<void> {
+  const dir = await runDir($)
+  if (!dir) return
+  const ANSWERS = answersFile(dir)
   // A tool.call result is { result } (or { deny }); AskUserQuestion's result carries { answers: { [question]: answer } }.
   const inner = (result as { result?: unknown } | undefined)?.result
   const raw = (inner as { answers?: Record<string, unknown> } | undefined)?.answers ?? {}
@@ -479,15 +582,48 @@ function requirementsMd(s: RunState): string {
   ].join('\n')
 }
 
+/** A change request starts from the finished run's brief, with the request appended verbatim, and keeps the base requirements for the regression check. */
+async function seedChange($: EngineInterface, baseDir: string, dir: string, request: string): Promise<void> {
+  const baseBrief = (await $.fs.exists(briefFile(baseDir))) ? await $.fs.read(briefFile(baseDir)) : ''
+  const stamp = new Date().toISOString().slice(0, 10)
+  await $.fs.write(briefFile(dir), `${baseBrief.trimEnd()}\n\n## Change request · ${stamp}\n\n${request.trim()}\n`)
+  const baseReqs = (await $.fs.exists(requirementsFile(baseDir))) ? await $.fs.read(requirementsFile(baseDir)) : ''
+  await $.fs.write(`${dir}/1-brief/base-requirements.md`, `# What the base run delivered\n\nBase run: ${baseDir}\n\n${baseReqs}`)
+}
+
 /** The one write path: the ledger file. */
-async function mutate($: EngineInterface, fn: (prev: RunState | null) => Outcome): Promise<string> {
+async function mutate($: EngineInterface, fn: (prev: RunState | null, extra?: Record<string, unknown>) => Outcome, input?: Record<string, unknown>): Promise<string> {
   const job = queue.then(async () => {
-    const prev = await loadFile($)
-    const out = fn(prev)
-    if (out.next) {
+    let dir = await runDir($)
+    let prev = await loadFile($, dir)
+    const starting = input?.action === 'init'
+    let base: { dir: string; state: RunState } | null = null
+    if (starting && prev && prev.stage === 'done') {
+      base = { dir: dir!, state: prev }
+      prev = null // a finished run stays in its folder; a new one gets its own
+    }
+    let extra: Record<string, unknown> | undefined
+    if (starting && input?.kind === 'change') {
+      if (!base) refuse(prev ? `the run in this folder is not finished (stage ${prev.stage}); finish or resume it before changing it` : 'no finished run in this folder to change; run /briefproof:build first')
+      extra = { base: base!.dir, project: base!.state.project }
+    }
+    const out = fn(prev, extra)
+    if (starting && out.next) {
+      await update($, cost, () => ({})) // a new run starts its own count
+      let fresh = newRunDir(out.next.project)
+      for (let n = 2; await $.fs.exists(stateFile(fresh)); n++) fresh = `${newRunDir(out.next.project)}-${n}`
+      out.next.dir = fresh
+      dir = fresh
+      out.reply += `\nRun folder: ${dir} (every file of this run goes under it).`
+      await $.fs.write(CURRENT, `${dir.slice(ROOT.length + 1)}\n`)
+      if (out.next.kind === 'change' && base) await seedChange($, base.dir, dir, out.next.request ?? '')
+    }
+    if (out.next && dir) {
+      if (!out.next.dir) out.next.dir = dir
       const usage = await read($, cost)
       if (Object.keys(usage).length > 0) out.next.usage = usage
-      const limit = budgetFor()
+      else if (starting) delete out.next.usage
+      const limit = out.next.budget?.override ? out.next.budget.limit : budgetFor()
       if (limit > 0 || out.next.budget) {
         const b = { ...(out.next.budget ?? {}), limit }
         const over = limit > 0 && budgetSpent(out.next) >= limit
@@ -498,8 +634,15 @@ async function mutate($: EngineInterface, fn: (prev: RunState | null) => Outcome
         }
         out.next.budget = b
       }
-      await $.fs.write(FILE, `${JSON.stringify(out.next, null, 2)}\n`)
-      if (out.next.requirements.length > 0) await $.fs.write(REQUIREMENTS, requirementsMd(out.next))
+      await $.fs.write(stateFile(dir), `${JSON.stringify(out.next, null, 2)}\n`)
+      if (out.next.requirements.length > 0) await $.fs.write(requirementsFile(dir), requirementsMd(out.next))
+      if (out.next.stage === 'done' && prev?.stage !== 'done') {
+        try { await recordStat($, out.next) } catch { /* stats are a convenience */ }
+        try {
+          const md = (await $.fs.exists(reportMd(dir))) ? await $.fs.read(reportMd(dir)) : ''
+          await $.fs.write(reportHtml(dir), reportPage(out.next, md))
+        } catch { /* the report page is a convenience */ }
+      }
       lastStamp = out.next.updatedAt
       await publish($, out.next)
       await announce($, out.events)
@@ -576,6 +719,9 @@ async function addRequirement($: EngineInterface, text: string) {
     s.requirements.push({ id, quote, status: 'open' })
     addLog(s, `You added ${id}`)
   }))
+  const dir = await runDir($)
+  if (!dir) return
+  const BRIEF = briefFile(dir)
   const brief = (await $.fs.exists(BRIEF)) ? await $.fs.read(BRIEF) : ''
   const header = brief.includes('## Additions') ? '' : `${brief.endsWith('\n') || !brief ? '' : '\n'}\n## Additions\n`
   await $.fs.write(BRIEF, `${brief}${header}\n- ${quote}\n`)
@@ -591,9 +737,18 @@ async function continueOverBudget($: EngineInterface) {
   await tellAgent($, 'Continue the Briefproof run; I chose to go past the token budget.')
 }
 
+async function setRunBudget($: EngineInterface, text: string) {
+  const m = /^\s*([\d][\d,]*(?:\.\d+)?)\s*([kKmM])?\s*(?:tokens?)?\s*$/.exec(String(text))
+  const n = m ? Number(m[1]!.replaceAll(',', '')) * (m[2] ? (m[2].toLowerCase() === 'k' ? 1e3 : 1e6) : 1) : NaN
+  if (!Number.isFinite(n) || n < 0) { $.ui.toast('A budget is a number of tokens, like 500000, 500k or 0.5M'); return }
+  await mutate($, prev => apply(prev, { action: 'budget', limit: Math.round(n) }))
+  $.ui.toast(n > 0 ? `Budget for this run: ${fmtTokens(Math.round(n))} tokens` : 'Budget removed')
+}
+
 async function resumeRun($: EngineInterface) {
   await update($, fresh, () => false)
-  await $.command.run({ command: 'briefproof:build' })
+  const s = await read($, run)
+  await $.command.run({ command: s?.kind === 'change' ? 'briefproof:change' : 'briefproof:build' })
 }
 
 async function setPaused($: EngineInterface, paused: boolean) {
@@ -895,6 +1050,131 @@ const TICKET_COLOR: Record<string, string> = { running: 'claude', review: 'warni
 const REQ_COLOR: Record<string, string> = {
   'in-spec': 'suggestion', done: 'success', deferred: 'warning', dropped: 'inactive', open: 'text',
 }
+// ── The report page: one self-contained HTML file a stakeholder can open without Claude Code ──
+
+const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+/** Inline markdown: code, bold, italics, links. */
+function inlineMd(t: string): string {
+  return esc(t)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2">$1</a>')
+}
+
+/** Enough markdown for a report: headings, paragraphs, lists, tables, fenced code, rules. */
+export function mdToHtml(md: string): string {
+  const lines = md.replace(/\r\n/g, '\n').split('\n')
+  const out: string[] = []
+  let i = 0
+  const flushPara = (buf: string[]) => { if (buf.length) { out.push(`<p>${inlineMd(buf.join(' '))}</p>`); buf.length = 0 } }
+  const para: string[] = []
+  while (i < lines.length) {
+    const line = lines[i]!
+    if (/^```/.test(line)) {
+      flushPara(para)
+      const code: string[] = []
+      i++
+      while (i < lines.length && !/^```/.test(lines[i]!)) code.push(lines[i]!), i++
+      i++
+      out.push(`<pre><code>${esc(code.join('\n'))}</code></pre>`)
+      continue
+    }
+    const h = /^(#{1,6})\s+(.*)$/.exec(line)
+    if (h) { flushPara(para); out.push(`<h${h[1]!.length + 1}>${inlineMd(h[2]!)}</h${h[1]!.length + 1}>`); i++; continue }
+    if (/^\s*[-*+]\s+/.test(line)) {
+      flushPara(para)
+      const items: string[] = []
+      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i]!)) items.push(lines[i]!.replace(/^\s*[-*+]\s+/, '')), i++
+      out.push(`<ul>${items.map(x => `<li>${inlineMd(x)}</li>`).join('')}</ul>`)
+      continue
+    }
+    if (/^\s*\d+[.)]\s+/.test(line)) {
+      flushPara(para)
+      const items: string[] = []
+      while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i]!)) items.push(lines[i]!.replace(/^\s*\d+[.)]\s+/, '')), i++
+      out.push(`<ol>${items.map(x => `<li>${inlineMd(x)}</li>`).join('')}</ol>`)
+      continue
+    }
+    if (/^\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\|[\s:|-]+\|\s*$/.test(lines[i + 1]!)) {
+      flushPara(para)
+      const cells = (l: string) => l.trim().replace(/^\||\|$/g, '').split('|').map(c => inlineMd(c.trim()))
+      const head = cells(line)
+      i += 2
+      const rows: string[][] = []
+      while (i < lines.length && /^\|.*\|\s*$/.test(lines[i]!)) rows.push(cells(lines[i]!)), i++
+      out.push(`<table><thead><tr>${head.map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`)
+      continue
+    }
+    if (/^\s*(---|\*\*\*)\s*$/.test(line)) { flushPara(para); out.push('<hr>'); i++; continue }
+    if (!line.trim()) { flushPara(para); i++; continue }
+    para.push(line.trim()); i++
+  }
+  flushPara(para)
+  return out.join('\n')
+}
+
+/** The whole page: header, the agent's report, requirements, tickets, tokens and time per stage. */
+export function reportPage(s: RunState, reportMarkdown: string): string {
+  const live = s.requirements.filter(r => r.status !== 'dropped' && r.status !== 'deferred')
+  const delivered = live.filter(r => r.status === 'done').length
+  const usage = s.usage ?? {}
+  const rows = s.stages
+    .map(st => ({ label: st.label, tokens: usage[st.id] ? tokensOf(usage[st.id]!) : 0, model: shortModel(usage[st.id]?.models ?? []), minutes: s.timeline?.[st.id]?.endedAt ? fmtMinutes(s.timeline[st.id]!.endedAt! - s.timeline[st.id]!.startedAt) : undefined }))
+    .filter(r => r.tokens > 0)
+  const total = rows.reduce((n, r) => n + r.tokens, 0)
+  const requests = Object.values(usage).reduce((n, c) => n + c.requests, 0)
+  const started = new Date(s.startedAt)
+  const ended = s.timeline?.done?.endedAt ?? s.updatedAt
+  const reqRows = s.requirements.map(r => `<tr><td class="id">${r.id}</td><td>${esc(r.quote)}</td><td><span class="pill ${esc(r.status)}">${esc(r.status)}</span>${r.reason ? `<div class="why">you: “${esc(r.reason)}”</div>` : ''}</td></tr>`).join('')
+  const ticketRows = s.tickets.map(t => `<tr><td class="id">${t.id}</td><td>${esc(t.title)}</td><td>${t.reqs.map(esc).join(', ')}</td><td><span class="pill ${esc(t.status)}">${esc(t.status)}</span>${t.review ? ' <span class="muted">reviewed</span>' : ''}</td></tr>`).join('')
+  const chart = rows.length ? costSvg(640, rows) : ''
+  const gates = Object.entries(s.gates).sort(([a], [b]) => a.localeCompare(b)).map(([g, v]) => `<span class="pill ${esc(v)}">${esc(GATE_LABEL[g] ?? g)}: ${esc(v)}</span>`).join(' ')
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(s.project)} · Briefproof report</title>
+<style>
+  :root { --bg:#faf8f4; --fg:#1f1d1a; --muted:#6f6a63; --line:#e6e1d8; --claude:#d97757; --ok:#2f9a5a; --warn:#c98a1b; --err:#d2473e; --card:#ffffff }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161616; --fg:#ece9e3; --muted:#9a9a9a; --line:#2c2c2c; --card:#1e1e1e } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:48px 24px 80px; }
+  h1 { font-size:34px; line-height:1.15; margin:0 0 6px; letter-spacing:-.01em } h2 { font-size:22px; margin:44px 0 12px } h3 { font-size:18px; margin:28px 0 8px }
+  .meta { color:var(--muted); margin-bottom:28px } .meta b { color:var(--fg); font-weight:600 }
+  .tiles { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:12px; margin:20px 0 }
+  .tile { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px } .tile .n { font-size:26px; font-weight:600; letter-spacing:-.01em } .tile .l { color:var(--muted); font-size:13px }
+  table { width:100%; border-collapse:collapse; font-size:15px } th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top } th { color:var(--muted); font-weight:600; font-size:13px; letter-spacing:.04em; text-transform:uppercase }
+  td.id { color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap } .why { color:var(--muted); font-size:13px; margin-top:4px }
+  .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; border:1px solid var(--line); color:var(--muted) }
+  .pill.done, .pill.pass { color:var(--ok); border-color:var(--ok) } .pill.failed, .pill.fail, .pill.dropped { color:var(--err); border-color:var(--err) } .pill.deferred, .pill.pending, .pill.review { color:var(--warn); border-color:var(--warn) } .pill.running, .pill.in-spec { color:var(--claude); border-color:var(--claude) }
+  .muted { color:var(--muted) } .report { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:8px 28px 20px; margin-top:12px }
+  .report pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px 14px; overflow:auto; font-size:13.5px } code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:.92em }
+  .chart { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; overflow-x:auto } .chart svg text { fill: var(--muted) }
+  footer { color:var(--muted); font-size:13px; margin-top:56px; border-top:1px solid var(--line); padding-top:16px }
+  @media print { body { background:#fff } .report, .tile, .chart { border-color:#ddd } }
+</style></head><body><main>
+<h1>${esc(s.project)}</h1>
+<div class="meta">${s.kind === 'change' ? `Change request: <b>“${esc(s.request ?? '')}”</b> · base run <code>${esc(s.base ?? '')}</code><br>` : ''}Briefproof report · ${s.mode} mode · started ${started.toISOString().slice(0, 16).replace('T', ' ')} · took ${fmtMinutes(ended - s.startedAt)}</div>
+<div class="tiles">
+  <div class="tile"><div class="n">${delivered}/${live.length}</div><div class="l">requirements delivered</div></div>
+  <div class="tile"><div class="n">${s.tickets.filter(t => t.status === 'done').length}/${s.tickets.length}</div><div class="l">tickets done</div></div>
+  <div class="tile"><div class="n">${fmtTokens(total)}</div><div class="l">tokens in ${requests} requests</div></div>
+  <div class="tile"><div class="n">${fmtMinutes(ended - s.startedAt)}</div><div class="l">wall clock</div></div>
+</div>
+<p>${gates}</p>
+<h2>Report</h2>
+<div class="report">${reportMarkdown.trim() ? mdToHtml(reportMarkdown) : '<p class="muted">The agent has not written 8-report/report.md yet.</p>'}</div>
+<h2>Requirements</h2>
+<p class="muted">Quoted from the brief, never paraphrased. Anything set aside carries the reason in the user's own words.</p>
+<table><thead><tr><th>#</th><th>Quote</th><th>Status</th></tr></thead><tbody>${reqRows}</tbody></table>
+<h2>Tickets</h2>
+<table><thead><tr><th>#</th><th>Ticket</th><th>Serves</th><th>Status</th></tr></thead><tbody>${ticketRows}</tbody></table>
+${rows.length ? `<h2>Where the tokens went</h2><p class="muted">${fmtTokens(total)} tokens in ${requests} requests; share, tokens, model, minutes per stage.</p><div class="chart">${chart}</div>` : ''}
+<footer>Made by Briefproof, a Claude Code plugin. Run folder: <code>${esc(s.dir ?? ROOT)}</code>. Every file this page summarises is in that folder.</footer>
+</main></body></html>
+`
+}
+
 /** The stage folders a run leaves in .briefproof/, in stage order, for the pane's "what you got" list. */
 const STAGE_DIRS: { dir: string; label: string; note: string }[] = [
   { dir: '1-brief', label: 'Brief', note: 'your words, as written' },
@@ -906,8 +1186,9 @@ const STAGE_DIRS: { dir: string; label: string; note: string }[] = [
   { dir: '7-acceptance', label: 'Acceptance', note: 'the blind check, sentence by sentence' },
   { dir: '8-report', label: 'Report', note: 'what was built and how to run it' },
 ]
-async function deliverables($: EngineInterface): Promise<{ root: string; items: { dir: string; label: string; note: string; href: string; count: number }[] }> {
-  const root = `${await $.session.cwd()}/.briefproof`
+async function deliverables($: EngineInterface): Promise<{ root: string; dir: string; items: { dir: string; label: string; note: string; href: string; count: number }[] }> {
+  const dir = (await runDir($)) ?? ROOT
+  const root = `${await $.session.cwd()}/${dir}`
   const items: { dir: string; label: string; note: string; href: string; count: number }[] = []
   for (const d of STAGE_DIRS) {
     const path = `${root}/${d.dir}`
@@ -915,7 +1196,7 @@ async function deliverables($: EngineInterface): Promise<{ root: string; items: 
     const count = (await $.fs.list(path)).filter(f => f.kind === 'file').length
     items.push({ dir: d.dir, label: d.label, note: d.note, href: `file://${path}`, count })
   }
-  return { root, items }
+  return { root, dir, items }
 }
 
 /** Opens a folder in the OS file browser: Finder, Explorer, or the desktop's default on Linux. */
@@ -937,8 +1218,8 @@ export function ticketIn(s: RunState, text: string): { ticket: Ticket; role: 'ex
   if (!m) return null
   const ticket = s.tickets.find(t => t.id === `T${m[1]}`)
   if (!ticket) return null
-  const head = text.slice(0, 600)
-  const role = /\breview(er|ing)?\b/i.test(head) ? 'reviewer' : 'executor'
+  const firstLine = text.split('\n', 1)[0] ?? ''
+  const role = /\breview(er|ing)?\b/i.test(firstLine) || /^\s*review of\b/im.test(text.slice(0, 200)) ? 'reviewer' : 'executor'
   return { ticket, role }
 }
 
@@ -966,7 +1247,9 @@ export const register: Register = (on, options) => {
     try {
       const existing = await loadFile($)
       if (existing && existing.stage !== 'done') await update($, fresh, () => true)
+      if (existing?.usage) await update($, cost, () => existing.usage!) // earlier sessions' tokens count too
     } catch { /* unreadable ledger: the tool reports it when called */ }
+    try { await update($, stats, () => null); const st = await loadStats($); if (st) await update($, stats, () => st) } catch { /* no stats yet */ }
 
     // Picks up a run that already exists (resume) or changed outside this session.
     $.clock.every(POLL_MS, () => {
@@ -999,7 +1282,10 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: TOOL }, async ($, call) => {
     await update($, fresh, () => false)
     try {
-      return { result: await mutate($, prev => apply(prev, call as unknown as Record<string, unknown>)) }
+      const input = call as unknown as Record<string, unknown>
+      const st = await read($, stats)
+      const live = await read($, cost)
+      return { result: await mutate($, (prev, extra) => apply(prev, { ...input, ...(extra ?? {}), __stats: st, __usage: live }), input) }
     } catch (err) {
       if (err instanceof Refusal) return { deny: err.message }
       throw err
@@ -1058,7 +1344,7 @@ export const register: Register = (on, options) => {
       }))
     }
     return result
-  }).catch(($, e, next) => (next.called ? next(e) : next(e)))
+  }).catch(($, e, next) => next(e)) // the mirror failed: the tool call itself still goes through
 
   // While the engine's own question dialog is open, the pane shows the questions and the capybara waits.
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
@@ -1084,7 +1370,7 @@ export const register: Register = (on, options) => {
         await recordAnswers($, questions, result)
       }
     }
-  }).catch(($, e, next) => (next.called ? next(e) : next(e)))
+  }).catch(($, e, next) => next(e)) // the mirror failed: the tool call itself still goes through
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const s = await read($, run)
@@ -1234,6 +1520,7 @@ export const register: Register = (on, options) => {
     const action = await read($, reqAction)
     const usage = await read($, cost)
     const isFresh = (await read($, fresh)) && s.stage !== 'done'
+    const statsNow = await read($, stats)
     const reqsOpen = ['manifest', 'briefing', 'spec', 'plan'].includes(s.stage) || action !== null
     const showReqs = reqs.length > 0 && s.stage !== 'done' && s.stage !== 'preflight'
 
@@ -1244,7 +1531,8 @@ export const register: Register = (on, options) => {
             {s.project}
             {s.paused && <Text color="warning">  · paused</Text>}
           </Text>
-          <Text dimColor>{s.mode === 'auto' ? 'auto' : 'ask'} mode · started {clock(s.startedAt)}</Text>
+          <Text dimColor>{s.kind === 'change' ? 'change request · ' : ''}{s.mode === 'auto' ? 'auto' : 'ask'} mode · started {clock(s.startedAt)}</Text>
+          {s.kind === 'change' && s.request && <Text dimColor wrap="wrap">“{s.request}”</Text>}
         </Box>
 
         {isFresh && !s.pending && (
@@ -1310,6 +1598,26 @@ export const register: Register = (on, options) => {
                 {here ? ` · ${fmtTokens(tokensOf(here))} tokens here` : ''}
                 {total > 0 ? ` · ${fmtTokens(total)} total` : ''}
               </Text>
+            )
+          })()}
+          {tickets.length > 0 && ['spec', 'plan'].includes(s.stage) && (() => {
+            const est = estimate(tickets.length, statsNow)
+            return (
+              <Box flexDirection="column">
+                <Text wrap="truncate-end">
+                  <Text bold>Estimate</Text>
+                  <Text dimColor>  about {fmtTokens(est.tokens)} tokens · {fmtMinutes(est.minutes * 60000)} for {tickets.length} tickets</Text>
+                </Text>
+                <Text dimColor wrap="truncate-end">based on {est.basis}</Text>
+                {full && (
+                  <full.Input
+                    key="budget-input"
+                    placeholder={s.budget?.limit ? `budget ${fmtTokens(s.budget.limit)} · type a new one in tokens` : 'Set a budget for this run, in tokens (e.g. 500000)'}
+                    submitLabel="Set"
+                    onSubmit={v => setRunBudget($, v)}
+                  />
+                )}
+              </Box>
             )
           })()}
           {s.budget && s.budget.limit > 0 && s.stage !== 'done' && (() => {
@@ -1391,9 +1699,15 @@ export const register: Register = (on, options) => {
                 ))}
               </Box>
               <Box gap={1}>
-                <Button key="open-folder" variant="primary" label="Open folder" onPress={async () => {
+                {(await $.fs.exists(reportHtml(got.dir))) && (
+                  <Button key="open-report" variant="primary" label="Open report page" onPress={async () => {
+                    const ok = await openFolder($, `${got.root}/8-report/report.html`)
+                    $.ui.toast(ok ? 'Opened the report' : `Couldn\u2019t open it here; it is at ${got.root}/8-report/report.html`)
+                  }} />
+                )}
+                <Button key="open-folder" variant={(await $.fs.exists(reportHtml(got.dir))) ? undefined : 'primary'} label="Open folder" onPress={async () => {
                   const ok = await openFolder($, got.root)
-                  $.ui.toast(ok ? 'Opened .briefproof' : `Couldn\u2019t open it here; the path is ${got.root}`)
+                  $.ui.toast(ok ? 'Opened the run folder' : `Couldn\u2019t open it here; the path is ${got.root}`)
                 }} />
                 <Button key="copy-path" label="Copy path" onPress={async press => {
                   const r = await $.ui.copy({ text: got.root, surface: press.surface })

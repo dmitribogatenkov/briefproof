@@ -1,8 +1,8 @@
 {
   "name": "briefproof",
   "displayName": "Briefproof",
-  "version": "0.8.0",
-  "description": "Describe what to build in plain words; get a working, verified project. Live pane with a capybara per stage, pause, requirements you can steer, and a model per stage to control cost. Run /briefproof:build in Claude Code.",
+  "version": "0.9.0",
+  "description": "Describe what to build in plain words; get a working, verified project, and change it later with the same proof. Live pane with a capybara per stage, a token budget and estimate, a model per stage, and a report page you can send. Run /briefproof:build in Claude Code.",
   "author": {
     "name": "Dmitri Bogatenkov"
   },

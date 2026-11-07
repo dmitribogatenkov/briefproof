@@ -29,10 +29,10 @@ function world(on: On) {
   on('ui.notify', async (_$, e) => { notices.push(e.text); return { value: { isSent: true, channel: 'terminal_bell' } } })
   on('prompt.submit', async (_$, e) => { prompts.push(e.text); return { text: e.text } })
   const ledger = () => {
-    const path = [...files.keys()].find(k => k.endsWith('/.briefproof/state.json'))
+    const path = [...files.keys()].find(k => k.endsWith('/state.json'))
     return JSON.parse(files.get(path ?? '') ?? 'null')
   }
-  const brief = () => files.get([...files.keys()].find(k => k.endsWith('/.briefproof/1-brief/brief.md')) ?? '') ?? ''
+  const brief = () => files.get([...files.keys()].find(k => k.endsWith('/1-brief/brief.md')) ?? '') ?? ''
   return { files, prompts, toasts, notices, ledger, brief }
 }
 
@@ -65,7 +65,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(w.ledger().pending).toBeUndefined()
     expect(w.ledger().log.at(-1).msg).toBe('Answers received')
     expect(w.prompts).toEqual([]) // nothing is sent on the user's behalf
-    const answers = w.files.get([...w.files.keys()].find(k => k.endsWith('/.briefproof/3-briefing/answers.md')) ?? '') ?? ''
+    const answers = w.files.get([...w.files.keys()].find(k => k.endsWith('/3-briefing/answers.md')) ?? '') ?? ''
     expect(answers).toMatch(/\*\*Where should it run\?\*\*\n→ Vercel/) // the dialog round is kept on disk
     expect(answers).toMatch(/Should clients pay when booking\?\*\*\n→ \(no answer recorded; suggested: No\)/)
   })

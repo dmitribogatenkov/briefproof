@@ -32,7 +32,7 @@ function world(on: On) {
       usage: { model: e.model, input_tokens: 1200, output_tokens: 300, cache_read_input_tokens: 5000, cache_creation_input_tokens: 0 },
     }
   })
-  const ledger = () => JSON.parse(files.get([...files.keys()].find(k => k.endsWith('/.briefproof/state.json')) ?? '') ?? 'null')
+  const ledger = () => JSON.parse(files.get([...files.keys()].find(k => k.endsWith('/state.json')) ?? '') ?? 'null')
   return { files, requested, ledger }
 }
 

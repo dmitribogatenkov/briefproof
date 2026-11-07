@@ -63,7 +63,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await call({ action: 'stage', stage: 'build' })
     expect((await call({ action: 'set_ticket', id: 'T01', status: 'done' })).result).toBe('T01 is done. 1/2 done.')
 
-    const path = [...files.keys()].find(k => k.endsWith('/.briefproof/state.json'))
+    const path = [...files.keys()].find(k => k.endsWith('/state.json'))
     expect(path).toBeDefined()
     const saved = JSON.parse(files.get(path ?? '') ?? '{}')
     expect(saved.stage).toBe('build')

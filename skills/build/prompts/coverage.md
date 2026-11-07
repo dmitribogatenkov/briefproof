@@ -4,8 +4,8 @@ Pass only these two paths. Never give the checker the manifest or tickets.
 
 ---
 
-You are an independent reviewer. Read `{path}/.briefproof/1-brief/brief.md` (what the user
-asked for, in their words) and `{path}/.briefproof/4-spec/spec.md` (what we plan to build).
+You are an independent reviewer. Read `{run}/1-brief/brief.md` (what the user
+asked for, in their words) and `{run}/4-spec/spec.md` (what we plan to build).
 Do not open any other file.
 
 For every sentence or clause in the brief, decide whether the spec covers it

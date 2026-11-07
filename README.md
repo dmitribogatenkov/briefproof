@@ -58,6 +58,20 @@ A few more ways to start a run:
 
 The pane opens on its own when a run starts.
 
+### Changing what it built
+
+```
+/briefproof:change add a cancellation link to the confirmation email
+```
+
+A change request is the same discipline at small scale, on top of a finished
+run: the request becomes new quoted requirements, the spec is a delta, only the
+tickets that change are built, and the blind checker verifies the request
+sentence by sentence and then confirms that everything the base run delivered
+still holds. Each run, build or change, lives in its own folder under
+`.briefproof/runs/`, so the history of a project is a list of briefs and
+reports.
+
 ## How it works
 
 Your brief becomes numbered requirements, quoted word for word. Briefproof asks
@@ -75,6 +89,7 @@ A few rules make this trustworthy, and I didn't bend any of them:
 | **The coordinator never writes code** | Each ticket runs in its own fresh context, so the main session stays sharp from the first question to the final report. |
 | **Boundaries come before tickets** | `interfaces.md` is written from the whole spec, so the first ticket doesn't quietly decide the architecture. |
 | **Review where it pays** | Foundation and risky tickets get a review, plus one pass over the whole branch. At most two fix rounds, so the cost stays predictable. |
+| **Changes keep the proof** | A change request is a small run on top of a finished one: quoted requirements, a spec delta, and a blind check of the request plus a regression pass over what the base run delivered. |
 | **Tickets run in waves** | Each ticket owns its files. Tickets that don't overlap run in parallel, three at a time; the ones that share files wait their turn. |
 | **Gates the agent can't talk its way past** | The run ledger refuses to mark a gate passed while it still has a problem: an open requirement, a ticket that traces to nothing. |
 | **Safe by default** | It never asks for secret values, and always asks before deploying, paying, sending or deleting. |
@@ -115,6 +130,15 @@ So now there's a capybara, and it tells you.
   notification when that happens.
 - **Resume is one click.** Open Claude Code in a folder with an unfinished run
   and the pane says where it stopped, with a Resume button.
+- **An estimate before the build.** Once the plan exists, the pane says roughly
+  how many tokens and minutes this many tickets will take, from your own past
+  runs (kept in `~/.briefproof/stats.json`; a stated default before the first).
+  In ask mode the agent asks Go, set a budget, or stop; the pane has a budget
+  field for the same thing.
+- **A report page you can send.** When the run finishes, the mod writes
+  `8-report/report.html`: the report, every requirement and its status, the
+  tickets, and the token and time chart, in one file that opens anywhere.
+  **Open report page** is the first button in What you got.
 - **It tells you when it needs you.** A desktop notification when questions are
   waiting, a short message as each ticket finishes.
 - **When it's done, it shows you what you got.** One line per stage folder in
@@ -154,7 +178,7 @@ The split I use when I want to save:
 The pane shows the model in force and the tokens spent so far. When the run is
 done it draws a bar per stage, so you can see where the tokens went, which
 model answered, and how many minutes each stage took. The final report carries
-the same table, and `.briefproof/state.json` keeps it under `usage` and
+the same table, and the run's `state.json` keeps it under `usage` and
 `timeline`.
 
 Two more settings live in the same place: **Token budget per run** (0 means no
@@ -165,7 +189,7 @@ limit) and **Capybara** (off keeps the pane, drops the picture).
 The mod registers one tool, `state`, and it's the only way the agent can record
 progress. It validates every change (no dropping a requirement without your
 words, no passing a gate with open problems, no new ticket while paused), writes
-`.briefproof/state.json`, and never needs your approval because it only touches
+the run's `state.json`, and never needs your approval because it only touches
 its own folder.
 
 ## Contributing
@@ -173,8 +197,22 @@ its own folder.
 ```bash
 git clone https://github.com/dmitribogatenkov/briefproof
 claude --plugin-dir ./briefproof          # load it from the folder for one session
-claude plugin test ./briefproof           # 13 tests against an in-memory engine
+claude plugin test ./briefproof           # 20 tests against an in-memory engine
 ```
+
+There is an eval suite under `evals/`: two full builds (the tip calculator and
+the massage studio), a change request on an empty folder, and a plain question
+that must not trigger anything. The cheap cases run in seconds:
+
+```bash
+claude plugin eval . --trust-plugin --tag negative --tag refusal --ablation none --allow-tools mcp__briefproof__state
+claude plugin eval . --trust-plugin --tag build --allow-tools Bash Write Edit Agent mcp__briefproof__state   # the real thing; costs real tokens
+```
+
+The build cases give the run a shell, so Claude Code needs its sandbox: on
+Linux that is `bubblewrap` and `socat` (`apt install bubblewrap socat`); macOS
+has one built in. The GitHub Action validates and tests on every push, and runs
+the evals weekly and on demand (it needs an `ANTHROPIC_API_KEY` secret).
 
 Pull requests are welcome. The screenshots in `docs/` are rendered from the
 mod's own SVG into a mock of the pane layout; if you have a capture from a real
@@ -186,6 +224,9 @@ run, I'd rather use that.
 .claude-plugin/plugin.json, marketplace.json
 skills/build/SKILL.md            the orchestrator (/briefproof:build)
 skills/build/prompts/            executor + reviewer, coverage (G2), acceptance (G4)
+skills/change/                   change requests on a finished run (/briefproof:change)
+evals/                           claude plugin eval cases
+.github/workflows/check.yml      validate + tests on push; evals weekly
 hooks/register.tsx               the mod: state tool, live pane, capybaras, model routing
 types/index.d.ts                 the run-state contract
 tests/                           claude plugin test .
@@ -194,25 +235,35 @@ docs/                            images for this README
 
 ## What a run leaves in your project
 
-One folder per stage, numbered the way the pane numbers them:
+Every run in its own folder, one subfolder per stage, numbered the way the
+pane numbers them:
 
 ```
 .briefproof/
-  state.json                  the ledger (written only by the state tool)
-  1-brief/brief.md            your words, secrets redacted; later wishes under "## Additions"
-  2-manifest/requirements.md  the numbered requirements and every change to them (the mod keeps it current)
-  3-briefing/answers.md       what was asked and what you answered (the mod writes it); decisions.md in auto mode
-  4-spec/spec.md              the specification
-  4-spec/interfaces.md        boundaries, shared types, what each finished ticket built
-  5-plan/NN-*.md              one file per ticket
-  6-build/*-review.md         what the reviewers flagged, plus the branch review
-  7-acceptance/acceptance.md  the blind checker's verdict, sentence by sentence
-  8-report/report.md          the final report (also posted in the chat)
-AGENTS.md                     project memory (unless you already have one)
+  current                               which run is current (a relative path)
+  runs/20261101-0941-massage-booking/
+    state.json                          the ledger (written only by the state tool)
+    1-brief/brief.md                    your words, secrets redacted; later wishes under "## Additions"
+    1-brief/base-requirements.md        change requests only: what the base run delivered
+    2-manifest/requirements.md          the numbered requirements and every change to them (the mod keeps it current)
+    3-briefing/answers.md               what was asked and what you answered (the mod writes it); decisions.md in auto mode
+    4-spec/spec.md                      the specification (a delta, for a change request)
+    4-spec/interfaces.md                boundaries, shared types, what each finished ticket built
+    5-plan/NN-*.md                      one file per ticket
+    6-build/*-review.md                 what the reviewers flagged, plus the branch review
+    7-acceptance/acceptance.md          the blind checker's verdict, sentence by sentence
+    8-report/report.md                  the final report (also posted in the chat)
+    8-report/report.html                the same, with the tables and chart, as one page to send
+AGENTS.md                               project memory (unless you already have one)
 ```
 
-The pane's **Open folder** button runs your OS's opener (`open` on macOS,
-`explorer` on Windows, `xdg-open` on Linux) on `.briefproof/`; that is the only
-command the mod ever runs.
+Runs from before 0.9 keep their files directly under `.briefproof/` and still
+work. `~/.briefproof/stats.json` holds one line per finished run (tickets,
+tokens and minutes per stage) and nothing else; it feeds the estimate.
+
+The pane's **Open folder** and **Open report page** buttons run your OS's
+opener (`open` on macOS, `explorer` on Windows, `xdg-open` on Linux) on the run
+folder or on `report.html`; that is the only command the mod ever runs, and only
+when you press one of those buttons.
 
 MIT © 2026 Dmitri Bogatenkov

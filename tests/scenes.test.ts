@@ -77,30 +77,41 @@ test('each stage shows a different capybara with a caption of its own (desktop)'
   await call({ action: 'set_ticket', id: 'T01', status: 'done' })
   await call({ action: 'set_ticket', id: 'T02', status: 'done' })
   await call({ action: 'set_requirement', id: 'R01', status: 'done' })
+  // The skill writes the report before it marks the run done; the mod then builds the page from it.
+  const rd0 = [...files.keys()].find(k => k.endsWith('/state.json'))!.replace(/\/state\.json$/, '')
+  files.set(`${rd0}/8-report/report.md`, '# Massage booking\n\nBuilt and verified.\n')
   await call({ action: 'stage', stage: 'done' })
   const done = await sceneAt()
   expect(done.alt).toMatch(/hot spring/)
   expect(done.text).toMatch(/All done · 1\/1 requirements delivered/)
 
   // What you got: one line per stage folder, Open folder runs the OS opener, Copy path copies the root.
-  files.set('/p/.briefproof/8-report/report.md', '# Massage booking\n\nBuilt and verified.\n')
-  files.set('/p/.briefproof/4-spec/spec.md', 'spec')
-  files.set('/p/.briefproof/5-plan/01-service-picker.md', 't1')
-  files.set('/p/.briefproof/5-plan/02-time-slots.md', 't2')
+  const rd = [...files.keys()].find(k => k.endsWith('/state.json'))!.replace(/\/state\.json$/, '')
+  expect(rd).toMatch(/^\/p\/\.briefproof\/runs\/\d{8}-\d{4}-massage-booking$/) // every run in its own folder
+  expect(files.get('/p/.briefproof/current')).toBe(rd.slice('/p/.briefproof/'.length) + '\n')
+  files.set(`${rd}/4-spec/spec.md`, 'spec')
+  files.set(`${rd}/5-plan/01-service-picker.md`, 't1')
+  files.set(`${rd}/5-plan/02-time-slots.md`, 't2')
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ text: /2  Requirements  1 file/ })).toBeDefined() // written by the mod itself
-  expect(files.get('/p/.briefproof/2-manifest/requirements.md')).toMatch(/\| R01 \| clients pick a service and a time \| done \|/)
+  expect(files.get(`${rd}/2-manifest/requirements.md`)).toMatch(/\| R01 \| clients pick a service and a time \| done \|/)
   expect(await ui.find({ text: /5  Tickets  2 files/ })).toBeDefined()
-  expect(await ui.find({ text: /8  Report  1 file/ })).toBeDefined()
+  expect(await ui.find({ text: /8  Report  2 files/ })).toBeDefined() // report.md plus the page the mod made
+  const html = files.get(`${rd}/8-report/report.html`) ?? ''
+  expect(html).toMatch(/<title>Massage booking · Briefproof report<\/title>/)
+  expect(html).toMatch(/Built and verified\./) // the agent's report.md, rendered
+  expect(html).toMatch(/<td class="id">R01<\/td><td>clients pick a service and a time<\/td>/)
+  expect(html).toMatch(/1\/1<\/div><div class="l">requirements delivered/)
+  expect(await ui.find({ key: 'open-report' })).toBeDefined()
   expect(await ui.find({ text: /Acceptance/ })).toBeUndefined() // nothing there yet, so no row
   await ui.press({ key: 'copy-path' })
-  expect(copied).toEqual(['/p/.briefproof'])
+  expect(copied).toEqual([rd])
   await ui.press({ key: 'open-folder' })
-  expect(ran).toEqual([['open', '/p/.briefproof']])
+  expect(ran).toEqual([['open', rd]])
   await ui.unmount()
 
   // On the terminal the folder names are real file:// links (Cmd-click opens them).
   const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect((await term.findAll({ type: 'Link' })).map(l => l.props.href)).toEqual(['file:///p/.briefproof/2-manifest', 'file:///p/.briefproof/4-spec', 'file:///p/.briefproof/5-plan', 'file:///p/.briefproof/8-report'])
+  expect((await term.findAll({ type: 'Link' })).map(l => l.props.href)).toEqual(['2-manifest', '4-spec', '5-plan', '8-report'].map(d => `file://${rd}/${d}`))
   await term.unmount()
 })

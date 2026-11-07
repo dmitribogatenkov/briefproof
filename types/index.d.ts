@@ -6,6 +6,13 @@ export type Question = { id: string; text: string; options: string[]; default: s
 /** Token usage per stage, summed over every model request made while that stage was current. */
 export type StageCost = { requests: number; input: number; output: number; cacheRead: number; cacheWrite: number; models: string[] }
 export type RunState = {
+  /** The run's folder, relative to the project: .briefproof/runs/<id>, or .briefproof for a run from before 0.9. */
+  dir?: string
+  /** A fresh build, or a change request on a finished run. */
+  kind?: 'build' | 'change'
+  /** change: the finished run this one changes, and the request in the user's words. */
+  base?: string
+  request?: string
   project: string
   mode: string
   stage: string
@@ -25,7 +32,7 @@ export type RunState = {
   /** When each stage began and ended, by the clock; the end chart shows minutes beside tokens. */
   timeline?: Record<string, { startedAt: number; endedAt?: number }>
   /** The token budget from the settings, whether the run crossed it, and whether the user chose to continue anyway. */
-  budget?: { limit: number; reached?: boolean; waived?: boolean }
+  budget?: { limit: number; reached?: boolean; waived?: boolean; override?: boolean }
 }
 /** A requirement row the user opened in the pane, and what they chose for it. */
 export type ReqAction = { id: string; kind: 'defer' | 'drop' | null }
@@ -42,6 +49,8 @@ declare module 'claude-code' {
       cost: Record<string, StageCost>
       /** True from session start until the agent touches the ledger: an existing run is interrupted, offer Resume. */
       fresh: boolean
+      /** ~/.briefproof/stats.json, loaded at session start: finished runs, for the estimate. */
+      stats: { runs: { at: number; project: string; kind: string; tickets: number; tokens: Record<string, number>; minutes: Record<string, number> }[] } | null
     }
   }
 }
