@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { PluginOptions } from 'claude-code'
-import type { Question, ReqAction, Requirement, RunState, StageCost, Ticket } from '../types'
+import type { Drift, Proof, Question, ReqAction, Requirement, RunStat, RunState, StageCost, Stats, Ticket } from '../types'
 
 // One mod, so users need nothing but Claude Code:
 //  1. the `state` tool: the only writer of .briefproof/state.json, with gates it enforces
@@ -20,7 +20,7 @@ const reportMd = (dir: string) => `${dir}/8-report/report.md`
 const reportHtml = (dir: string) => `${dir}/8-report/report.html`
 const POLL_MS = 2000
 const TICK_MS = 220
-const NBSP = ' '
+const NBSP = '\u00A0'
 
 const run = atom({ plugin: 'briefproof', key: 'run' } as const, null)
 const opened = atom({ plugin: 'briefproof', key: 'opened' } as const, false)
@@ -29,30 +29,38 @@ const reqAction = atom({ plugin: 'briefproof', key: 'reqAction' } as const, null
 const cost = atom({ plugin: 'briefproof', key: 'cost' } as const, {})
 const fresh = atom({ plugin: 'briefproof', key: 'fresh' } as const, false)
 const stats = atom({ plugin: 'briefproof', key: 'stats' } as const, null)
+const drift = atom({ plugin: 'briefproof', key: 'drift' } as const, null)
 
 const STAGES = ['preflight', 'manifest', 'briefing', 'spec', 'plan', 'build', 'accept', 'done'] as const
+/** An adopted project is described, confirmed and verified; nothing is specified, planned or built. */
+const ADOPT_STAGES = ['preflight', 'manifest', 'briefing', 'accept', 'done'] as const
 const LABELS: Record<string, string> = {
   preflight: 'Preflight', manifest: 'Manifest', briefing: 'Briefing', spec: 'Spec',
   plan: 'Plan', build: 'Build', accept: 'Acceptance', done: 'Done',
 }
-const REQ_STATUS = ['open', 'in-spec', 'done', 'deferred', 'dropped']
+const REQ_STATUS = ['open', 'in-spec', 'done', 'deferred', 'dropped', 'broken']
 const TICKET_STATUS = ['todo', 'running', 'review', 'done', 'failed']
 const GATES = ['G1', 'G2', 'G3', 'G4']
+const ADOPT_GATES = ['G1', 'G4']
 const GATE_RESULTS = ['pass', 'fail', 'pending']
+const KINDS = ['build', 'change', 'adopt']
 const ACTIONS = [
   'init', 'stage', 'mode', 'add_requirements', 'set_requirement', 'add_tickets',
-  'set_ticket', 'gate', 'log', 'check', 'show', 'budget',
+  'set_ticket', 'gate', 'log', 'check', 'show', 'budget', 'recheck', 'snapshot',
 ]
 
 const DESCRIPTION = [
   'The Briefproof run ledger: the ONLY way to create or change the run state (state.json in the run folder)',
   '(never edit that file by hand). Drives the live progress pane the user watches.',
-  'Actions: init {project, mode?} or init {kind: "change", request, mode?} on a finished run · stage {stage} · mode {mode} ·',
-  'add_requirements {quotes: verbatim strings} → R01… · set_requirement {id, status, reason?} ·',
+  'Actions: init {project, mode?} · init {kind: "change", request, mode?} on a finished run · init {kind: "adopt", project, mode?} for an existing project ·',
+  'stage {stage} · mode {mode} · add_requirements {quotes: verbatim strings} → R01… ·',
+  'set_requirement {id, status, reason?, files?, note?} (files: the project files where it lives, from the acceptance check; note: the evidence in one line) ·',
   'add_tickets {tickets: [{title, reqs, review?}]} → T01… · set_ticket {id, status} ·',
   'gate {gate: G1-G4, result: pass|fail|pending, note?} · log {message} ·',
-  'check (gate problems) · show (plain-text summary with the estimate, use it to resume) ·',
-  'budget {limit: tokens} (a budget for this run, set when the user picks one after the estimate).',
+  'check (gate problems) · show (plain-text summary with the estimate and any drift, use it to resume) ·',
+  'budget {limit: tokens} (a budget for this run, set when the user picks one after the estimate) ·',
+  'recheck (a finished run: marks a re-check in progress; requests run on the Acceptance model) ·',
+  'snapshot (after a re-check: records the evidence files as they are now, so the drift warning clears).',
 ].join(' ')
 
 const INPUT_SCHEMA = {
@@ -61,13 +69,14 @@ const INPUT_SCHEMA = {
     action: { type: 'string', enum: ACTIONS },
     project: { type: 'string' },
     mode: { type: 'string', enum: ['ask', 'auto'] },
-    kind: { type: 'string', enum: ['build', 'change'], description: 'init only: change = a change request on the finished run in this folder' },
+    kind: { type: 'string', enum: KINDS, description: 'init only: change = a change request on the finished run in this folder; adopt = describe and verify a project that already exists, as a finished run' },
     request: { type: 'string', description: 'init with kind change: the change request, verbatim' },
     stage: { type: 'string', enum: [...STAGES] },
     quotes: { type: 'array', items: { type: 'string' } },
     id: { type: 'string', description: 'R## or T##' },
-    status: { type: 'string', description: `requirement: ${REQ_STATUS.join('|')}; ticket: ${TICKET_STATUS.join('|')}` },
+    status: { type: 'string', description: `requirement: ${REQ_STATUS.join('|')} (broken: it held once and no longer does, or was claimed and not found); ticket: ${TICKET_STATUS.join('|')}` },
     reason: { type: 'string', description: "for deferred/dropped: the user's own words" },
+    files: { type: 'array', items: { type: 'string' }, description: 'set_requirement: the project files (relative paths) where this requirement lives, as the acceptance checker named them; the pane watches them for changes' },
     tickets: {
       type: 'array',
       items: {
@@ -82,7 +91,7 @@ const INPUT_SCHEMA = {
     },
     gate: { type: 'string', enum: GATES },
     result: { type: 'string', enum: GATE_RESULTS },
-    note: { type: 'string' },
+    note: { type: 'string', description: 'gate: a remark for the log; set_requirement: the evidence in one line (command and what it showed)' },
     message: { type: 'string' },
     limit: { type: 'number', description: 'budget: tokens this run may use before new tickets stop; 0 removes it' },
   },
@@ -111,7 +120,8 @@ function find<T extends { id: string }>(items: T[], id: unknown): T {
   return items.find(x => x.id === want) ?? refuse(`unknown id ${want}`)
 }
 
-export function problems(s: RunState): string[] {
+/** What keeps the gates from passing. With `gate`, also the rules checked only when that gate is graded (G2, G4). */
+export function problems(s: RunState, gate?: string): string[] {
   const out: string[] = []
   const ids = new Set(s.requirements.map(r => r.id))
   for (const r of s.requirements) {
@@ -130,21 +140,41 @@ export function problems(s: RunState): string[] {
     if (t.reqs.length === 0) out.push(`G3 ${t.id} traces to no requirement`)
     for (const id of t.reqs) if (!ids.has(id)) out.push(`G3 ${t.id} names unknown ${id}`)
   }
+  const live = s.requirements.filter(r => r.status !== 'dropped' && r.status !== 'deferred')
+  if (gate === 'G2') {
+    for (const r of live) if (r.status === 'open') out.push(`G2 ${r.id} is still open: cover it in the spec and mark it in-spec, or defer it in the user's words`)
+  }
+  if (gate === 'G4') {
+    for (const r of live) {
+      if (r.status !== 'done' && r.status !== 'broken') out.push(`G4 ${r.id} is ${r.status}: the blind check has neither verified it (done) nor found it missing (broken)`)
+    }
+  }
   return out
 }
 
-export function summary(s: RunState, st: Stats | null = null): string {
+/** The gates a run of this kind has: an adopted project is never specified or planned, so it has no G2 or G3. */
+const gatesOf = (s: RunState): string[] => (s.kind === 'adopt' ? ADOPT_GATES : GATES)
+
+export function summary(s: RunState, st: Stats | null = null, d: Drift | null = null): string {
   const done = s.tickets.filter(t => t.status === 'done').length
   const lines = [
     `${s.project} · ${LABELS[s.stage] ?? s.stage} · mode ${s.mode}${s.paused ? ' · PAUSED by the user' : ''}`,
     `run folder: ${s.dir ?? ROOT} (write every file of this run under it)`,
     ...(s.kind === 'change' ? [`change request on ${s.base}: "${s.request}"`] : []),
-    `gates: ${GATES.map(g => `${g} ${s.gates[g] ?? 'pending'}`).join('  ')}`,
-    `tickets ${done}/${s.tickets.length}`,
+    ...(s.kind === 'adopt' ? ['adopted project: the brief describes what it does today; no spec, plan or build stages'] : []),
+    `gates: ${Object.keys(s.gates).map(g => `${g} ${s.gates[g] ?? 'pending'}`).join('  ')}`,
+    ...(s.kind === 'adopt' ? [] : [`tickets ${done}/${s.tickets.length}`]),
     ...s.tickets.map(t => `  ${t.id} [${t.status}] ${t.title} (${t.reqs.join(', ')})`),
     'requirements:',
-    ...s.requirements.map(r => `  ${r.id} [${r.status}] ${r.quote}${r.reason ? ` (user: "${r.reason}")` : ''}`),
+    ...s.requirements.map(r => `  ${r.id} [${r.status}] ${r.quote}${r.reason ? ` (user: "${r.reason}")` : ''}${r.files?.length ? ` · in ${r.files.join(', ')}` : ''}`),
   ]
+  if (s.stage === 'done') {
+    if (s.rechecking) lines.push('re-check in progress: finish it with set_requirement per requirement, then snapshot')
+    const broken = s.requirements.filter(r => r.status === 'broken')
+    if (broken.length) lines.push(`no longer holds: ${broken.map(r => r.id).join(', ')}. Offer /briefproof:change to fix it.`)
+    if (d && d.changed.length) lines.push(`drift: ${d.changed.length} evidence file${d.changed.length > 1 ? 's' : ''} changed since the last check (${d.changed.slice(0, 6).join(', ')}${d.changed.length > 6 ? ', …' : ''}); ${d.reqs.join(', ')} may be stale. /briefproof:recheck verifies them again.`)
+    else if (s.proof) lines.push(`proof: ${Object.keys(s.proof.files).length} evidence files unchanged since ${new Date(s.proof.at).toISOString().slice(0, 16).replace('T', ' ')}`)
+  }
   if (s.pending) lines.push(`a question dialog is open: ${s.pending.questions.length} question(s)`)
   if (s.usage) {
     lines.push('usage by stage:')
@@ -167,25 +197,30 @@ export function summary(s: RunState, st: Stats | null = null): string {
   return lines.join('\n')
 }
 
-export function newRun(project: string, mode: string, change?: { base: string; request: string }): RunState {
+export function newRun(project: string, mode: string, opts: { kind?: 'build' | 'change' | 'adopt'; base?: string; request?: string } = {}): RunState {
   const now = Date.now()
+  const kind = opts.kind ?? 'build'
+  const stages = kind === 'adopt' ? ADOPT_STAGES : STAGES
   const s: RunState = {
     project, mode, stage: 'preflight',
-    kind: change ? 'change' : 'build',
-    ...(change ? { base: change.base, request: change.request } : {}),
-    stages: STAGES.map(id => ({ id, label: LABELS[id] ?? id })),
+    kind,
+    ...(kind === 'change' ? { base: opts.base, request: opts.request } : {}),
+    stages: stages.map(id => ({ id, label: LABELS[id] ?? id })),
     startedAt: now, updatedAt: now,
     requirements: [], tickets: [],
-    gates: Object.fromEntries(GATES.map(g => [g, 'pending'])),
+    gates: Object.fromEntries((kind === 'adopt' ? ADOPT_GATES : GATES).map(g => [g, 'pending'])),
     log: [],
     timeline: { preflight: { startedAt: now } },
   }
-  addLog(s, change ? `Change request started · ${mode} mode` : `Run started · ${mode} mode`)
+  addLog(s, kind === 'change' ? `Change request started · ${mode} mode` : kind === 'adopt' ? `Adopting the project · ${mode} mode` : `Run started · ${mode} mode`)
   return s
 }
 
 /** Applies one ledger action: the new state (null for read-only actions), the reply, and what to announce. */
-export function apply(prev: RunState | null, e: Record<string, unknown>): Outcome {
+/** What the session knows that the ledger file does not: read by `show` only. */
+export type Live = { stats?: Stats | null; usage?: Record<string, StageCost>; drift?: Drift | null }
+
+export function apply(prev: RunState | null, e: Record<string, unknown>, live: Live = {}): Outcome {
   const action = str(e.action) ?? refuse('action is required')
   if (!ACTIONS.includes(action)) refuse(`unknown action ${action}; one of ${ACTIONS.join(', ')}`)
   const events: Event[] = []
@@ -194,11 +229,17 @@ export function apply(prev: RunState | null, e: Record<string, unknown>): Outcom
     if (prev) refuse(`a run already exists here (${prev.project}, stage ${prev.stage}). Use show to resume it.`)
     const mode = str(e.mode) ?? 'ask'
     if (mode !== 'ask' && mode !== 'auto') refuse('mode is ask or auto')
-    if (str(e.kind) === 'change') {
+    const kind = str(e.kind) ?? 'build'
+    if (!KINDS.includes(kind)) refuse(`kind is one of ${KINDS.join(', ')}`)
+    if (kind === 'change') {
       const request = str(e.request) ?? refuse('a change request needs request: what to change, in the user\'s words')
       const base = str(e.base) ?? refuse('no finished run in this folder to change; run /briefproof:build first')
-      const s = newRun(str(e.project) ?? 'Change', mode, { base, request })
+      const s = newRun(str(e.project) ?? 'Change', mode, { kind: 'change', base, request })
       return { next: s, reply: `Change request on "${s.project}" started in ${mode} mode. The brief in the new run folder carries the request under "## Change request"; the base run is at ${base}.`, events }
+    }
+    if (kind === 'adopt') {
+      const s = newRun(str(e.project) ?? refuse('init needs project: the name of the project being adopted'), mode, { kind: 'adopt' })
+      return { next: s, reply: `Adopting "${s.project}" in ${mode} mode: five stages (Preflight, Manifest, Briefing, Acceptance, Done), no tickets. Describe what the project does today in 1-brief/brief.md, quote it into requirements, confirm with the user, then have a blind checker verify each line in the code and record its files with set_requirement.`, events }
     }
     const s = newRun(str(e.project) ?? refuse('init needs project'), mode)
     return { next: s, reply: `Run "${s.project}" started in ${mode} mode.`, events }
@@ -207,9 +248,8 @@ export function apply(prev: RunState | null, e: Record<string, unknown>): Outcom
   const cur = prev ?? refuse('no run in this folder yet; call init first')
   if (action === 'show') {
     // Live usage from this session is ahead of the file between writes; show the newer of the two.
-    const live = e.__usage as Record<string, StageCost> | undefined
-    const view = live && Object.keys(live).length > 0 ? { ...cur, usage: live } : cur
-    return { next: null, reply: summary(view, (e.__stats as Stats | null) ?? null), events }
+    const view = live.usage && Object.keys(live.usage).length > 0 ? { ...cur, usage: live.usage } : cur
+    return { next: null, reply: summary(view, live.stats ?? null, live.drift ?? null), events }
   }
   if (action === 'check') {
     const p = problems(cur)
@@ -221,21 +261,26 @@ export function apply(prev: RunState | null, e: Record<string, unknown>): Outcom
   switch (action) {
     case 'stage': {
       const stage = str(e.stage) ?? refuse('stage is required')
-      if (!(STAGES as readonly string[]).includes(stage)) refuse(`stage is one of ${STAGES.join(', ')}`)
+      const allowed = s.stages.map(x => x.id)
+      if (!allowed.includes(stage)) refuse(`stage is one of ${allowed.join(', ')}${s.kind === 'adopt' ? ' (an adopted project has no spec, plan or build stage)' : ''}`)
       const now = Date.now()
       s.timeline = { ...(s.timeline ?? {}) }
       if (stage !== s.stage) {
         const prevSpan = s.timeline[s.stage]
         if (prevSpan && !prevSpan.endedAt) s.timeline[s.stage] = { ...prevSpan, endedAt: now }
-        if (!s.timeline[stage]) s.timeline[stage] = { startedAt: now }
+        const seen = s.timeline[stage]
+        if (!seen) s.timeline[stage] = { startedAt: now }
+        // Back to a stage it already left: reopen the span with the earlier time carried in, so a second visit adds up.
+        else if (seen.endedAt) s.timeline[stage] = { startedAt: now - (seen.endedAt - seen.startedAt) }
       }
       s.stage = stage
       addLog(s, `Stage → ${LABELS[stage]}`)
       reply = `Stage is now ${LABELS[stage]}.`
       if (stage === 'done') {
-        s.timeline.done = { startedAt: now, endedAt: now }
-        const live = s.requirements.filter(r => r.status !== 'dropped' && r.status !== 'deferred')
-        events.push({ kind: 'done', delivered: live.filter(r => r.status === 'done').length, total: live.length })
+        // Closed for now; the end of the turn that finished the run closes it again, with the report written.
+        s.timeline.done = { ...(s.timeline.done ?? { startedAt: now }), endedAt: now }
+        const inScope = s.requirements.filter(r => r.status !== 'dropped' && r.status !== 'deferred')
+        events.push({ kind: 'done', delivered: inScope.filter(r => r.status === 'done').length, total: inScope.length })
       }
       break
     }
@@ -266,13 +311,27 @@ export function apply(prev: RunState | null, e: Record<string, unknown>): Outcom
       if ((status === 'dropped' || status === 'deferred') && !reason && !r.reason) {
         refuse(`${status} needs reason: the user's own words agreeing to it`)
       }
+      const files = strings(e.files).map(f => f.replaceAll('\\', '/').split('/').filter((seg, i) => seg !== '.' && (seg !== '' || i === 0)).join('/'))
+      for (const f of files) {
+        if (f.startsWith('/') || /^[A-Za-z]:\//.test(f) || f.split('/').includes('..')) refuse(`files are paths relative to the project root (got ${f}); an absolute path or a path into the clone would never match`)
+        if (/(^|\/)(node_modules|\.git|dist|build|\.venv|__pycache__)(\/|$)/.test(f)) refuse(`${f} is a dependency or build output, not evidence; name the source file or the test`)
+      }
+      const note = str(e.note)
+      const was = r.status
       r.status = status
       if (reason) r.reason = reason
+      // The words that set it aside do not explain why it is open again, or vouch for it once it is back in scope.
+      else if ((was === 'deferred' || was === 'dropped') && status !== 'deferred' && status !== 'dropped') delete r.reason
+      if (files.length) r.files = [...new Set(files)]
+      if (note) r.note = note
       if (status === 'deferred' || status === 'dropped') addLog(s, `${r.id} ${status}`)
-      reply = `${r.id} is ${status}.`
+      if (status === 'broken' && was !== 'broken') addLog(s, `${r.id} no longer holds${note ? `: ${note}` : ''}`)
+      if (status === 'done' && was === 'broken') addLog(s, `${r.id} holds again`)
+      reply = `${r.id} is ${status}.${files.length ? ` Watching ${files.length} file${files.length > 1 ? 's' : ''} for it.` : ''}`
       break
     }
     case 'add_tickets': {
+      if (s.kind === 'adopt') refuse('an adopted project has no tickets: it is described and verified, not built. To change it, finish the adoption and run /briefproof:change.')
       const list = Array.isArray(e.tickets) ? e.tickets : []
       if (list.length === 0) refuse('add_tickets needs tickets: [{title, reqs, review?}]')
       const ids = list.map(raw => {
@@ -316,11 +375,11 @@ export function apply(prev: RunState | null, e: Record<string, unknown>): Outcom
     }
     case 'gate': {
       const gate = str(e.gate)?.toUpperCase() ?? refuse('gate is required')
-      if (!GATES.includes(gate)) refuse('gate is G1, G2, G3 or G4')
+      if (!gatesOf(s).includes(gate)) refuse(`gate is one of ${gatesOf(s).join(', ')}${s.kind === 'adopt' ? ' (an adopted project has no spec or plan, so no G2 or G3)' : ''}`)
       const result = str(e.result) ?? refuse('result is required')
       if (!GATE_RESULTS.includes(result)) refuse('result is pass, fail or pending')
       if (result === 'pass') {
-        const p = problems(s).filter(x => x.startsWith(gate))
+        const p = problems(s, gate).filter(x => x.startsWith(gate))
         if (p.length) refuse(`${gate} cannot pass yet:\n${p.join('\n')}`)
       }
       s.gates[gate] = result
@@ -338,6 +397,21 @@ export function apply(prev: RunState | null, e: Record<string, unknown>): Outcom
       s.budget = { ...(s.budget ?? {}), limit, override: true, waived: false, reached: false }
       addLog(s, limit > 0 ? `Budget for this run: ${fmtTokens(limit)} tokens` : 'Budget removed for this run')
       reply = limit > 0 ? `Budget set: ${fmtTokens(limit)} tokens for this run.` : 'Budget removed for this run.'
+      break
+    }
+    case 'recheck': {
+      if (s.stage !== 'done') refuse('recheck is for a finished run; an unfinished one is resumed, not re-checked')
+      if (!s.rechecking) addLog(s, 'Re-check started')
+      s.rechecking = true
+      reply = 'Re-check in progress: requests now run on the Acceptance model and count there. Verify, record with set_requirement, then snapshot.'
+      break
+    }
+    case 'snapshot': {
+      if (s.stage !== 'done') refuse('snapshot is for a finished run: it records the evidence files after a re-check')
+      if (evidenceFiles(s).length === 0 && s.kind !== 'change') refuse('nothing to snapshot: no requirement names files yet (set_requirement with files, from the acceptance check)')
+      delete s.rechecking
+      addLog(s, 'Evidence re-checked')
+      reply = 'ok' // the write path fills in the counts once it has hashed the files
       break
     }
   }
@@ -396,8 +470,10 @@ export function tokensOf(c: StageCost): number {
 }
 
 export function fmtTokens(n: number): string {
-  if (n < 1000) return String(n)
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`
+  if (n < 1000) return String(Math.round(n))
+  const k = n / 1000
+  if (k < 9.95) return `${k.toFixed(1)}k`
+  if (k < 999.5) return `${Math.round(k)}k`
   return `${(n / 1_000_000).toFixed(2)}M`
 }
 
@@ -408,16 +484,12 @@ export function fmtMinutes(ms: number): string {
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
 }
 
-/** One finished run, as ~/.briefproof/stats.json keeps it for the estimates. */
-export type RunStat = { at: number; project: string; kind: string; tickets: number; tokens: Record<string, number>; minutes: Record<string, number> }
-export type Stats = { runs: RunStat[] }
-
 export function statOf(s: RunState): RunStat {
   const tokens: Record<string, number> = {}
   for (const [k, c] of Object.entries(s.usage ?? {})) tokens[k] = tokensOf(c)
   const minutes: Record<string, number> = {}
   for (const [k, t] of Object.entries(s.timeline ?? {})) if (t.endedAt) minutes[k] = (t.endedAt - t.startedAt) / 60000
-  return { at: Date.now(), project: s.project, kind: s.kind ?? 'build', tickets: s.tickets.length, tokens, minutes }
+  return { at: Date.now(), ...(s.dir ? { dir: s.dir } : {}), project: s.project, kind: s.kind ?? 'build', tickets: s.tickets.length, tokens, minutes }
 }
 
 /** Tokens and minutes a build of N tickets is likely to take: from past runs when there are any, else a stated rough default. */
@@ -449,7 +521,9 @@ async function recordStat($: EngineInterface, s: RunState): Promise<void> {
   const path = await statsPath($)
   if (!path) return
   const st = (await loadStats($)) ?? { runs: [] }
-  st.runs = [...st.runs, statOf(s)].slice(-50)
+  const mine = statOf(s)
+  // One entry per run: finishing it again, or closing its last turn, replaces the entry instead of adding one.
+  st.runs = [...st.runs.filter(r => !(mine.dir && r.dir === mine.dir)), mine].slice(-50)
   await $.fs.write(path, `${JSON.stringify(st, null, 2)}\n`)
   await update($, stats, () => st)
 }
@@ -471,26 +545,112 @@ export function budgetBlocks(s: RunState): boolean {
   return !!s.budget && s.budget.limit > 0 && !s.budget.waived && budgetSpent(s) >= s.budget.limit
 }
 
+// ── Proof: the evidence files behind each requirement, and whether they moved ──
+
+/** FNV-1a over the text, as 8 hex digits: enough to notice a change, cheap enough to run at session start. */
+export function hashText(text: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16).padStart(8, '0')
+}
+
+/** Every file some requirement names, once, in order. */
+export function evidenceFiles(s: RunState): string[] {
+  return [...new Set(s.requirements.flatMap(r => r.files ?? []))]
+}
+
+/** A change run stands on its base run, which stands on its own; the whole chain is what the project is. */
+async function baseChain($: EngineInterface, s: RunState): Promise<RunState[]> {
+  const out: RunState[] = []
+  let cur: RunState | null = s
+  for (let i = 0; i < 8 && cur?.kind === 'change' && cur.base; i++) {
+    try { cur = await loadFile($, cur.base) } catch { break }
+    if (!cur) break
+    out.push(cur)
+  }
+  return out
+}
+
+/** Every file this run and its base chain watch, and which requirements each one carries. Base ids read "R02 (base)". */
+export function watchOf(s: RunState, bases: RunState[] = []): { files: string[]; reqsOf: Record<string, string[]> } {
+  const reqsOf: Record<string, string[]> = {}
+  const add = (r: Requirement, label: string) => { for (const f of r.files ?? []) (reqsOf[f] ??= []).push(label) }
+  for (const r of s.requirements) add(r, r.id)
+  // A base requirement this run restates (same quote, whatever its status here) is this run's to watch, not the base's twice.
+  const here = new Set(s.requirements.map(r => r.quote))
+  for (const b of bases) for (const r of b.requirements) if (r.status === 'done' && !here.has(r.quote)) add(r, `${r.id} (base)`)
+  return { files: Object.keys(reqsOf), reqsOf }
+}
+
+/** Reads the watched files as they are now. A file that is gone hashes as "missing", which is a change too. */
+async function hashEvidence($: EngineInterface, s: RunState, bases: RunState[]): Promise<Proof> {
+  const files: Record<string, string> = {}
+  const root = await $.session.cwd()
+  for (const f of watchOf(s, bases).files) {
+    const path = `${root}/${f}`
+    try { files[f] = (await $.fs.exists(path)) ? hashText(await $.fs.read(path)) : 'missing' } catch { files[f] = 'missing' }
+  }
+  return { at: Date.now(), files }
+}
+
+/** What differs between the recorded proof and the files now, and which requirements that touches. Null when nothing is watched. */
+export function driftOf(s: RunState, now: Proof, bases: RunState[] = []): Drift | null {
+  if (!s.proof) return null
+  const watch = watchOf(s, bases) // a file no requirement names any more is nobody's business
+  const changed = Object.keys(s.proof.files).filter(f => f in watch.reqsOf && s.proof!.files[f] !== (now.files[f] ?? 'missing'))
+  const reqs = [...new Set(changed.flatMap(f => watch.reqsOf[f] ?? []))]
+  return { changed, reqs }
+}
+
+async function detectDrift($: EngineInterface, s: RunState | null): Promise<Drift | null> {
+  if (!s || s.stage !== 'done' || !s.proof) return null
+  const bases = await baseChain($, s)
+  const d = driftOf(s, await hashEvidence($, s, bases), bases)
+  return d && d.changed.length ? d : null
+}
+
 // ── Effects shared by the tool and the pane's buttons ────────────────────────
 
 // Writes may arrive together (parallel tool calls, a click during a call):
 // each read-modify-write waits for the one before.
 let queue: Promise<unknown> = Promise.resolve()
+/** Runs after every write already waiting; a failure is the caller's, and does not hold up the next one. */
+function queued<T>(job: () => Promise<T>): Promise<T> {
+  const run = queue.then(job)
+  queue = run.catch(() => undefined)
+  return run
+}
 let lastStamp = -1
+/**
+ * The main turn that set the run to done is still going: until it ends, its requests run on the
+ * Done model and count toward the run. After that a finished run is history and leaves requests alone.
+ */
+let closingTurn = false
+/** The marker mutate gets when that turn ends: re-record the stats and rewrite the report page. */
+const CLOSE = 'mod:close'
 
-function statusLine(s: RunState): string {
+function statusLine(s: RunState, d: Drift | null = null): string {
   const stage = LABELS[s.stage] ?? s.stage
   const done = s.tickets.filter(t => t.status === 'done').length
   const base = s.tickets.length > 0 ? `briefproof · ${stage} · ${done}/${s.tickets.length} tickets` : `briefproof · ${stage}`
   if (s.pending) return `${base} · waiting for you`
   if (s.paused) return `${base} · paused`
+  if (s.stage === 'done') {
+    if (s.rechecking) return `${base} · re-checking`
+    const broken = s.requirements.filter(r => r.status === 'broken').length
+    if (broken) return `${base} · ${broken} no longer hold${broken === 1 ? 's' : ''}`
+    if (d?.reqs.length) return `${base} · ${d.reqs.length} may be stale`
+  }
   return base
 }
 
 /** Pushes a state to the pane and status line; opens the pane the first time a run appears. */
 async function publish($: EngineInterface, s: RunState | null) {
   await update($, run, () => s)
-  $.ui.status(s ? statusLine(s) : undefined)
+  $.ui.status(s ? statusLine(s, await read($, drift)) : undefined)
   if (s && !(await read($, opened))) {
     await update($, opened, () => true)
     await $.ui.open({ id: PANE, title: `Briefproof · ${s.project}` })
@@ -563,20 +723,22 @@ async function recordAnswers($: EngineInterface, questions: Question[], result: 
 
 /** 2-manifest/requirements.md: the ledger's requirements as a page a person can read, rewritten on every change. */
 function requirementsMd(s: RunState): string {
+  const cell = (t: string) => t.replace(/\s*\n\s*/g, ' ').replaceAll('|', '\\|')
   const rows = s.requirements.map(r => {
     const tail = r.reason ? ` (you: "${r.reason}")` : ''
-    return `| ${r.id} | ${r.quote.replaceAll('|', '\\|')} | ${r.status}${tail} |`
+    return `| ${r.id} | ${cell(r.quote)} | ${r.status}${cell(tail)} | ${cell((r.files ?? []).join(', '))}${r.note ? `${r.files?.length ? ' · ' : ''}${cell(r.note)}` : ''} |`
   })
   const live = s.requirements.filter(r => r.status !== 'dropped' && r.status !== 'deferred').length
   return [
     `# Requirements · ${s.project}`,
     '',
     'Each line is quoted from the brief, never paraphrased. A requirement leaves this list only with your own words saying why.',
+    'The last column is where the acceptance check found it and what it saw; Briefproof watches those files and warns when they change.',
     '',
     `${live} in scope · ${s.requirements.length - live} set aside · updated ${new Date(s.updatedAt).toISOString()}`,
     '',
-    '| # | Quote | Status |',
-    '|---|---|---|',
+    '| # | Quote | Status | Evidence |',
+    '|---|---|---|---|',
     ...rows,
     '',
   ].join('\n')
@@ -593,7 +755,7 @@ async function seedChange($: EngineInterface, baseDir: string, dir: string, requ
 
 /** The one write path: the ledger file. */
 async function mutate($: EngineInterface, fn: (prev: RunState | null, extra?: Record<string, unknown>) => Outcome, input?: Record<string, unknown>): Promise<string> {
-  const job = queue.then(async () => {
+  return queued(async () => {
     let dir = await runDir($)
     let prev = await loadFile($, dir)
     const starting = input?.action === 'init'
@@ -608,24 +770,29 @@ async function mutate($: EngineInterface, fn: (prev: RunState | null, extra?: Re
       extra = { base: base!.dir, project: base!.state.project }
     }
     const out = fn(prev, extra)
+    // The pointer to a new run's folder is written last, after its ledger: if seeding or the
+    // write fails, `current` still names the finished run, and the call can simply be retried.
+    let pointer: string | null = null
     if (starting && out.next) {
       await update($, cost, () => ({})) // a new run starts its own count
-      let fresh = newRunDir(out.next.project)
-      for (let n = 2; await $.fs.exists(stateFile(fresh)); n++) fresh = `${newRunDir(out.next.project)}-${n}`
-      out.next.dir = fresh
-      dir = fresh
+      let folder = newRunDir(out.next.project)
+      for (let n = 2; await $.fs.exists(stateFile(folder)); n++) folder = `${newRunDir(out.next.project)}-${n}`
+      out.next.dir = folder
+      dir = folder
       out.reply += `\nRun folder: ${dir} (every file of this run goes under it).`
-      await $.fs.write(CURRENT, `${dir.slice(ROOT.length + 1)}\n`)
       if (out.next.kind === 'change' && base) await seedChange($, base.dir, dir, out.next.request ?? '')
+      pointer = `${dir.slice(ROOT.length + 1)}\n`
     }
     if (out.next && dir) {
       if (!out.next.dir) out.next.dir = dir
       const usage = await read($, cost)
       if (Object.keys(usage).length > 0) out.next.usage = usage
       else if (starting) delete out.next.usage
-      const limit = out.next.budget?.override ? out.next.budget.limit : budgetFor()
-      if (limit > 0 || out.next.budget) {
-        const b = { ...(out.next.budget ?? {}), limit }
+      const had = out.next.budget
+      const limit = had?.override ? had.limit : budgetFor()
+      if (limit > 0 || had) {
+        // Reached and Continue belong to the limit they were made against: a new limit (say, raised in the settings) starts clean.
+        const b = had && had.limit !== limit ? { ...had, limit, reached: false, waived: false } : { ...(had ?? {}), limit }
         const over = limit > 0 && budgetSpent(out.next) >= limit
         if (over && !b.reached) {
           b.reached = true
@@ -634,10 +801,34 @@ async function mutate($: EngineInterface, fn: (prev: RunState | null, extra?: Re
         }
         out.next.budget = b
       }
+      const finishing = out.next.stage === 'done' && prev?.stage !== 'done'
+      const closing = input?.action === CLOSE
+      if (finishing) closingTurn = true
+      const snapshotting = input?.action === 'snapshot'
+      if (finishing || snapshotting) {
+        // The evidence files as they are now, this run's and its base chain's: the baseline the drift warning compares against.
+        try {
+          const bases = await baseChain($, out.next)
+          const proof = await hashEvidence($, out.next, bases)
+          const n = Object.keys(proof.files).length
+          if (n) out.next.proof = proof
+          else delete out.next.proof
+          if (snapshotting) {
+            const reqs = new Set(Object.values(watchOf(out.next, bases).reqsOf).flat()).size
+            out.reply = n
+              ? `Proof refreshed: ${n} file${n === 1 ? '' : 's'} across ${reqs} requirement${reqs === 1 ? '' : 's'}${bases.length ? ' (this run and its base)' : ''}. The pane warns when any of them changes.`
+              : 'Nothing is watched: no requirement names files. Record them with set_requirement {files} from the acceptance check.'
+          }
+        } catch { /* no proof is better than a wrong one */ }
+        await update($, drift, () => null)
+      }
       await $.fs.write(stateFile(dir), `${JSON.stringify(out.next, null, 2)}\n`)
+      if (pointer) await $.fs.write(CURRENT, pointer)
       if (out.next.requirements.length > 0) await $.fs.write(requirementsFile(dir), requirementsMd(out.next))
-      if (out.next.stage === 'done' && prev?.stage !== 'done') {
+      if (finishing || closing) {
         try { await recordStat($, out.next) } catch { /* stats are a convenience */ }
+      }
+      if (finishing || closing || (out.next.stage === 'done' && (snapshotting || input?.action === 'set_requirement' || input?.action === 'add_requirements'))) {
         try {
           const md = (await $.fs.exists(reportMd(dir))) ? await $.fs.read(reportMd(dir)) : ''
           await $.fs.write(reportHtml(dir), reportPage(out.next, md))
@@ -649,8 +840,6 @@ async function mutate($: EngineInterface, fn: (prev: RunState | null, extra?: Re
     }
     return out.reply
   })
-  queue = job.catch(() => undefined)
-  return job
 }
 
 /** A change the user made in the pane: applied to a copy, logged, stamped. */
@@ -667,10 +856,6 @@ function edit(fn: (s: RunState) => void): (prev: RunState | null) => Outcome {
       if (was !== t.status && (t.status === 'done' || t.status === 'failed')) {
         events.push({ kind: 'ticket', id: t.id, title: t.title, status: t.status })
       }
-    }
-    if (s.stage === 'done' && prev.stage !== 'done') {
-      const live = s.requirements.filter(r => r.status !== 'dropped' && r.status !== 'deferred')
-      events.push({ kind: 'done', delivered: live.filter(r => r.status === 'done').length, total: live.length })
     }
     return { next: s, reply: 'ok', events }
   }
@@ -719,12 +904,17 @@ async function addRequirement($: EngineInterface, text: string) {
     s.requirements.push({ id, quote, status: 'open' })
     addLog(s, `You added ${id}`)
   }))
-  const dir = await runDir($)
-  if (!dir) return
-  const BRIEF = briefFile(dir)
-  const brief = (await $.fs.exists(BRIEF)) ? await $.fs.read(BRIEF) : ''
-  const header = brief.includes('## Additions') ? '' : `${brief.endsWith('\n') || !brief ? '' : '\n'}\n## Additions\n`
-  await $.fs.write(BRIEF, `${brief}${header}\n- ${quote}\n`)
+  // In the write queue too: two additions in a row must not read the same brief and lose one.
+  await queued(async () => {
+    const dir = await runDir($)
+    if (!dir) return
+    const BRIEF = briefFile(dir)
+    const brief = (await $.fs.exists(BRIEF)) ? await $.fs.read(BRIEF) : ''
+    // Under the brief's last heading only: a change run inherits its base's Additions further up, above the change request.
+    const lastHeading = [...brief.matchAll(/^##\s+(.*)$/gm)].at(-1)?.[1]?.trim()
+    const header = lastHeading === 'Additions' ? '' : `${brief.endsWith('\n') || !brief ? '' : '\n'}\n## Additions\n`
+    await $.fs.write(BRIEF, `${brief}${header}\n- ${quote}\n`)
+  })
   await tellAgent($, `New requirement ${id}: "${quote}". I added it to the brief under Additions; please fit it into the spec and plan.`)
 }
 
@@ -748,7 +938,14 @@ async function setRunBudget($: EngineInterface, text: string) {
 async function resumeRun($: EngineInterface) {
   await update($, fresh, () => false)
   const s = await read($, run)
-  await $.command.run({ command: s?.kind === 'change' ? 'briefproof:change' : 'briefproof:build' })
+  await $.command.run({ command: s?.kind === 'change' ? 'briefproof:change' : s?.kind === 'adopt' ? 'briefproof:adopt' : 'briefproof:build' })
+}
+
+/** The Re-check button: a blind checker verifies the requirements whose files changed, then the proof is retaken. */
+async function recheckRun($: EngineInterface) {
+  try { await mutate($, prev => apply(prev, { action: 'recheck' })) } catch { /* the skill marks it itself */ }
+  $.ui.toast('Re-checking the requirements whose files changed')
+  await $.command.run({ command: 'briefproof:recheck' })
 }
 
 async function setPaused($: EngineInterface, paused: boolean) {
@@ -976,6 +1173,13 @@ const QUIPS: Record<string, string[]> = {
   accept: ['A stranger reads your brief, then the code. Never the other way round.', 'Blind check: a fresh agent, your original words, no memory of the build.'],
   done: ['Hot spring, a yuzu, nothing left on the list.', 'You earned the break. The capybara only did the typing.'],
   paused: ['Napping until you press Resume. No new tickets until then.', 'Holding still. The ticket in progress finishes, then nothing moves.'],
+  'adopt:preflight': ['Reading the code, not the README. What it does beats what it says.', 'Looking at a project nobody wrote a brief for. Yet.'],
+  'adopt:manifest': ['Writing the brief this project never had, one observable sentence at a time.', 'Each line is something a user could see it do. No architecture here.'],
+  'adopt:briefing': ['Your project, your words. Fix anything that reads wrong.', 'Drop what it doesn’t do, add what it does. The pane takes both.'],
+  'adopt:accept': ['A stranger checks each sentence against the code and writes down where it lives.', 'Verified means found and run, not read about.'],
+  'adopt:done': ['Adopted. From here, /briefproof:change keeps the proof going.', 'A brief, a numbered list, and the files behind each line. The project has a past now.'],
+  stale: ['Something under a verified requirement changed. Not broken, not proven either.', 'Re-check takes minutes; the blind checker looks only at what moved.'],
+  broken: ['A requirement that held no longer does. /briefproof:change puts it back.', 'The proof is honest about this one: it broke.'],
 }
 export function quip(key: string, seed: number): string {
   const list = QUIPS[key] ?? QUIPS.build!
@@ -1006,10 +1210,10 @@ export function costSvg(w: number, rows: { label: string; tokens: number; model:
     const y = i * rowH
     const share = r.tokens / total
     const bw = Math.max(2, Math.round(barW * share))
-    return `<text x="0" y="${y + 15}" ${font} fill="${MUTED}">${r.label}</text>
+    return `<text x="0" y="${y + 15}" ${font} fill="${MUTED}">${esc(r.label)}</text>
       <rect x="${labelW}" y="${y + 5}" width="${barW}" height="12" rx="6" fill="${MUTED}" fill-opacity=".18"/>
       <rect x="${labelW}" y="${y + 5}" width="${bw}" height="12" rx="6" fill="#D97757" fill-opacity="${0.55 + share * 0.45}"/>
-      <text x="${labelW + barW + 10}" y="${y + 15}" ${font} fill="${MUTED}">${String(Math.round(share * 100)).padStart(2)}%  ${fmtTokens(r.tokens)}${r.model ? `  ${r.model}` : ''}${r.minutes ? `  ${r.minutes}` : ''}</text>`
+      <text x="${labelW + barW + 10}" y="${y + 15}" ${font} fill="${MUTED}">${String(Math.round(share * 100)).padStart(2)}%  ${fmtTokens(r.tokens)}${r.model ? `  ${esc(r.model)}` : ''}${r.minutes ? `  ${r.minutes}` : ''}</text>`
   }).join('')
   const h = rows.length * rowH
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img">${bars}</svg>`
@@ -1048,7 +1252,7 @@ function clock(ms: number): string {
 const TICKET_MARK: Record<string, string> = { todo: '○', running: '◐', review: '◑', done: '●', failed: '✗' }
 const TICKET_COLOR: Record<string, string> = { running: 'claude', review: 'warning', done: 'success', failed: 'error' }
 const REQ_COLOR: Record<string, string> = {
-  'in-spec': 'suggestion', done: 'success', deferred: 'warning', dropped: 'inactive', open: 'text',
+  'in-spec': 'suggestion', done: 'success', deferred: 'warning', dropped: 'inactive', open: 'text', broken: 'error',
 }
 // ── The report page: one self-contained HTML file a stakeholder can open without Claude Code ──
 
@@ -1082,7 +1286,7 @@ export function mdToHtml(md: string): string {
       continue
     }
     const h = /^(#{1,6})\s+(.*)$/.exec(line)
-    if (h) { flushPara(para); out.push(`<h${h[1]!.length + 1}>${inlineMd(h[2]!)}</h${h[1]!.length + 1}>`); i++; continue }
+    if (h) { flushPara(para); const level = Math.min(6, h[1]!.length + 1); out.push(`<h${level}>${inlineMd(h[2]!)}</h${level}>`); i++; continue }
     if (/^\s*[-*+]\s+/.test(line)) {
       flushPara(para)
       const items: string[] = []
@@ -1127,7 +1331,9 @@ export function reportPage(s: RunState, reportMarkdown: string): string {
   const requests = Object.values(usage).reduce((n, c) => n + c.requests, 0)
   const started = new Date(s.startedAt)
   const ended = s.timeline?.done?.endedAt ?? s.updatedAt
-  const reqRows = s.requirements.map(r => `<tr><td class="id">${r.id}</td><td>${esc(r.quote)}</td><td><span class="pill ${esc(r.status)}">${esc(r.status)}</span>${r.reason ? `<div class="why">you: “${esc(r.reason)}”</div>` : ''}</td></tr>`).join('')
+  const reqRows = s.requirements.map(r => `<tr><td class="id">${r.id}</td><td>${esc(r.quote)}${r.note ? `<div class="why">${esc(r.note)}</div>` : ''}${r.files?.length ? `<div class="why"><code>${r.files.map(esc).join('</code> <code>')}</code></div>` : ''}</td><td><span class="pill ${esc(r.status)}">${esc(r.status === 'broken' ? 'no longer holds' : r.status)}</span>${r.reason ? `<div class="why">you: “${esc(r.reason)}”</div>` : ''}</td></tr>`).join('')
+  const broken = s.requirements.filter(r => r.status === 'broken').length
+  const watched = evidenceFiles(s).length
   const ticketRows = s.tickets.map(t => `<tr><td class="id">${t.id}</td><td>${esc(t.title)}</td><td>${t.reqs.map(esc).join(', ')}</td><td><span class="pill ${esc(t.status)}">${esc(t.status)}</span>${t.review ? ' <span class="muted">reviewed</span>' : ''}</td></tr>`).join('')
   const chart = rows.length ? costSvg(640, rows) : ''
   const gates = Object.entries(s.gates).sort(([a], [b]) => a.localeCompare(b)).map(([g, v]) => `<span class="pill ${esc(v)}">${esc(GATE_LABEL[g] ?? g)}: ${esc(v)}</span>`).join(' ')
@@ -1146,7 +1352,7 @@ export function reportPage(s: RunState, reportMarkdown: string): string {
   table { width:100%; border-collapse:collapse; font-size:15px } th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top } th { color:var(--muted); font-weight:600; font-size:13px; letter-spacing:.04em; text-transform:uppercase }
   td.id { color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap } .why { color:var(--muted); font-size:13px; margin-top:4px }
   .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; border:1px solid var(--line); color:var(--muted) }
-  .pill.done, .pill.pass { color:var(--ok); border-color:var(--ok) } .pill.failed, .pill.fail, .pill.dropped { color:var(--err); border-color:var(--err) } .pill.deferred, .pill.pending, .pill.review { color:var(--warn); border-color:var(--warn) } .pill.running, .pill.in-spec { color:var(--claude); border-color:var(--claude) }
+  .pill.done, .pill.pass { color:var(--ok); border-color:var(--ok) } .pill.failed, .pill.fail, .pill.dropped, .pill.broken { color:var(--err); border-color:var(--err) } .pill.deferred, .pill.pending, .pill.review { color:var(--warn); border-color:var(--warn) } .pill.running, .pill.in-spec { color:var(--claude); border-color:var(--claude) }
   .muted { color:var(--muted) } .report { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:8px 28px 20px; margin-top:12px }
   .report pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px 14px; overflow:auto; font-size:13.5px } code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:.92em }
   .chart { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; overflow-x:auto } .chart svg text { fill: var(--muted) }
@@ -1154,23 +1360,23 @@ export function reportPage(s: RunState, reportMarkdown: string): string {
   @media print { body { background:#fff } .report, .tile, .chart { border-color:#ddd } }
 </style></head><body><main>
 <h1>${esc(s.project)}</h1>
-<div class="meta">${s.kind === 'change' ? `Change request: <b>“${esc(s.request ?? '')}”</b> · base run <code>${esc(s.base ?? '')}</code><br>` : ''}Briefproof report · ${s.mode} mode · started ${started.toISOString().slice(0, 16).replace('T', ' ')} · took ${fmtMinutes(ended - s.startedAt)}</div>
+<div class="meta">${s.kind === 'change' ? `Change request: <b>“${esc(s.request ?? '')}”</b> · base run <code>${esc(s.base ?? '')}</code><br>` : s.kind === 'adopt' ? 'Adopted project: what it does today, each line verified in the code<br>' : ''}Briefproof report · ${esc(s.mode)} mode · started ${started.toISOString().slice(0, 16).replace('T', ' ')} · took ${fmtMinutes(ended - s.startedAt)}</div>
 <div class="tiles">
-  <div class="tile"><div class="n">${delivered}/${live.length}</div><div class="l">requirements delivered</div></div>
-  <div class="tile"><div class="n">${s.tickets.filter(t => t.status === 'done').length}/${s.tickets.length}</div><div class="l">tickets done</div></div>
+  <div class="tile"><div class="n">${delivered}/${live.length}</div><div class="l">requirements ${s.kind === 'adopt' ? 'verified' : 'delivered'}</div></div>
+  ${s.kind === 'adopt' ? `<div class="tile"><div class="n">${watched}</div><div class="l">files watched</div></div>` : `<div class="tile"><div class="n">${s.tickets.filter(t => t.status === 'done').length}/${s.tickets.length}</div><div class="l">tickets done</div></div>`}
   <div class="tile"><div class="n">${fmtTokens(total)}</div><div class="l">tokens in ${requests} requests</div></div>
   <div class="tile"><div class="n">${fmtMinutes(ended - s.startedAt)}</div><div class="l">wall clock</div></div>
 </div>
-<p>${gates}</p>
+<p>${gates}${broken ? ` <span class="pill broken">${broken} no longer hold${broken === 1 ? 's' : ''}</span>` : ''}</p>
 <h2>Report</h2>
 <div class="report">${reportMarkdown.trim() ? mdToHtml(reportMarkdown) : '<p class="muted">The agent has not written 8-report/report.md yet.</p>'}</div>
 <h2>Requirements</h2>
-<p class="muted">Quoted from the brief, never paraphrased. Anything set aside carries the reason in the user's own words.</p>
+<p class="muted">Quoted from the brief, never paraphrased. Anything set aside carries the reason in the user's own words.${watched ? ' Under each quote: the checker\u2019s evidence and the files it lives in.' : ''}</p>
 <table><thead><tr><th>#</th><th>Quote</th><th>Status</th></tr></thead><tbody>${reqRows}</tbody></table>
-<h2>Tickets</h2>
-<table><thead><tr><th>#</th><th>Ticket</th><th>Serves</th><th>Status</th></tr></thead><tbody>${ticketRows}</tbody></table>
+${s.kind === 'adopt' ? '' : `<h2>Tickets</h2>
+<table><thead><tr><th>#</th><th>Ticket</th><th>Serves</th><th>Status</th></tr></thead><tbody>${ticketRows}</tbody></table>`}
 ${rows.length ? `<h2>Where the tokens went</h2><p class="muted">${fmtTokens(total)} tokens in ${requests} requests; share, tokens, model, minutes per stage.</p><div class="chart">${chart}</div>` : ''}
-<footer>Made by Briefproof, a Claude Code plugin. Run folder: <code>${esc(s.dir ?? ROOT)}</code>. Every file this page summarises is in that folder.</footer>
+<footer>Made by Briefproof, a Claude Code plugin. Run folder: <code>${esc(s.dir ?? ROOT)}</code>. Every file this page summarises is in that folder.${s.proof ? ` Evidence last checked ${new Date(s.proof.at).toISOString().slice(0, 16).replace('T', ' ')} across ${Object.keys(s.proof.files).length} file${Object.keys(s.proof.files).length === 1 ? '' : 's'}.` : ''}</footer>
 </main></body></html>
 `
 }
@@ -1199,8 +1405,8 @@ async function deliverables($: EngineInterface): Promise<{ root: string; dir: st
   return { root, dir, items }
 }
 
-/** Opens a folder in the OS file browser: Finder, Explorer, or the desktop's default on Linux. */
-async function openFolder($: EngineInterface, path: string): Promise<boolean> {
+/** Opens a folder or a file with the OS: Finder, Explorer, or the desktop's default on Linux. */
+async function openPath($: EngineInterface, path: string): Promise<boolean> {
   const isWindows = (await $.env.get('OS')) === 'Windows_NT'
   const attempts: string[][] = isWindows ? [['explorer', path]] : [['open', path], ['xdg-open', path]]
   for (const argv of attempts) {
@@ -1212,25 +1418,42 @@ async function openFolder($: EngineInterface, path: string): Promise<boolean> {
   return false
 }
 
-/** Which ticket a subagent is for, and whether it builds or reviews, read off the spawn's description and prompt. */
-export function ticketIn(s: RunState, text: string): { ticket: Ticket; role: 'executor' | 'reviewer' } | null {
-  const m = /\bT(\d{2})\b/.exec(text)
-  if (!m) return null
-  const ticket = s.tickets.find(t => t.id === `T${m[1]}`)
+/**
+ * Which ticket a subagent is for, and whether it builds or reviews. Only the spawn's description and
+ * the prompt's first line count: the prompts open with `Ticket T03: …` or `Review of T03 …`, and ids
+ * further down are dependencies and context. A title that contains "review" does not make a reviewer.
+ */
+export function ticketIn(s: RunState, description: string, prompt: string): { ticket: Ticket; role: 'executor' | 'reviewer' } | null {
+  const first = prompt.split('\n').find(l => l.trim())?.trim() ?? ''
+  const desc = description.trim()
+  const named = /^(?:ticket|review of)\s+(T\d{2,})\b/i.exec(first)?.[1]
+  const ids = [named, ...[desc, first].flatMap(l => [...l.matchAll(/\bT\d{2,}\b/g)].map(m => m[0]))]
+  const ticket = ids.map(id => (id ? s.tickets.find(t => t.id === id.toUpperCase()) : undefined)).find(t => !!t)
   if (!ticket) return null
-  const firstLine = text.split('\n', 1)[0] ?? ''
-  const role = /\breview(er|ing)?\b/i.test(firstLine) || /^\s*review of\b/im.test(text.slice(0, 200)) ? 'reviewer' : 'executor'
-  return { ticket, role }
+  const reviewer = [desc, first].some(l => /^review(er|ing)?\b/i.test(l)) || /\byou are the reviewer\b/i.test(`${desc}\n${first}`)
+  return { ticket, role: reviewer ? 'reviewer' : 'executor' }
 }
 
-/** DONE, DONE_WITH_NOTES or BLOCKED from a subagent's final text; null when it reported none. */
-export function verdictOf(result: unknown): 'DONE' | 'DONE_WITH_NOTES' | 'BLOCKED' | null {
+type Verdict = 'DONE' | 'DONE_WITH_NOTES' | 'BLOCKED'
+
+/**
+ * What a subagent reported, read the way its prompt asks it to report; null when it reported nothing readable.
+ * Executor: its verdict on a line of its own (`DONE`, `DONE_WITH_NOTES`, `BLOCKED: …`); the word inside
+ * a sentence ("not DONE yet", "was BLOCKED by CORS") is not a verdict.
+ * Reviewer: its `BLOCKING:` section; `none` is DONE, any issue there is BLOCKED (the ticket goes back for a fix).
+ */
+export function verdictOf(result: unknown, role: 'executor' | 'reviewer' = 'executor'): Verdict | null {
   const inner = (result as { result?: unknown } | undefined)?.result as { content?: { type: string; text?: string }[] } | undefined
   const text = (inner?.content ?? []).map(c => c.text ?? '').join('\n')
-  if (/\bBLOCKED\b/.test(text)) return 'BLOCKED'
-  if (/\bDONE_WITH_NOTES\b/.test(text)) return 'DONE_WITH_NOTES'
-  if (/\bDONE\b/.test(text) || /\bno blocking\b/i.test(text) || /\bBLOCKING:\s*none\b/i.test(text)) return 'DONE'
-  return null
+  if (role === 'reviewer') {
+    const at = text.indexOf('BLOCKING:')
+    if (at < 0) return /\bno blocking (issues?|problems?|findings?)\b/i.test(text) ? 'DONE' : null
+    const section = text.slice(at + 'BLOCKING:'.length).split(/\n[\s*_#>`-]*LATER:/)[0] ?? ''
+    const body = section.replace(/^[\s*_`>•-]+/, '').trim()
+    return body === '' || /^(none|nothing|n\/a)\b/i.test(body) ? 'DONE' : 'BLOCKED'
+  }
+  const m = /^[ \t*_`>#-]*(DONE_WITH_NOTES|DONE|BLOCKED)\b/m.exec(text)
+  return (m?.[1] as Verdict | undefined) ?? null
 }
 
 const GATE_LABEL: Record<string, string> = {
@@ -1243,11 +1466,18 @@ export const register: Register = (on, options) => {
   modelOptions = options
 
   on('session.start', async ($, e, next) => {
+    closingTurn = false // a run finished in an earlier session is history here
     await $.tool.register({ name: 'state', description: DESCRIPTION, inputSchema: INPUT_SCHEMA, isDeferred: false })
     try {
       const existing = await loadFile($)
       if (existing && existing.stage !== 'done') await update($, fresh, () => true)
       if (existing?.usage) await update($, cost, () => existing.usage!) // earlier sessions' tokens count too
+      // A re-check never spans sessions: one left half-done is over, and the pane offers it again.
+      if (existing?.rechecking) await mutate($, edit(s => { delete s.rechecking; addLog(s, 'Re-check did not finish; press Re-check to start it again') }))
+      // A finished run: have its evidence files moved since the last check?
+      const d = await detectDrift($, existing)
+      await update($, drift, () => d)
+      if (d) $.ui.toast(`Briefproof: ${d.changed.length} file${d.changed.length > 1 ? 's' : ''} behind ${d.reqs.join(', ')} changed since the last check`)
     } catch { /* unreadable ledger: the tool reports it when called */ }
     try { await update($, stats, () => null); const st = await loadStats($); if (st) await update($, stats, () => st) } catch { /* no stats yet */ }
 
@@ -1284,8 +1514,9 @@ export const register: Register = (on, options) => {
     try {
       const input = call as unknown as Record<string, unknown>
       const st = await read($, stats)
-      const live = await read($, cost)
-      return { result: await mutate($, (prev, extra) => apply(prev, { ...input, ...(extra ?? {}), __stats: st, __usage: live }), input) }
+      const usage = await read($, cost)
+      const d = await read($, drift)
+      return { result: await mutate($, (prev, extra) => apply(prev, { ...input, ...(extra ?? {}) }, { stats: st, usage, drift: d }), input) }
     } catch (err) {
       if (err instanceof Refusal) return { deny: err.message }
       throw err
@@ -1299,8 +1530,9 @@ export const register: Register = (on, options) => {
   // model the settings name for the current stage, and its usage is counted there.
   on('turn.step', async function* ($, e, next) {
     const s = await read($, run)
-    if (!s) return yield* next(e)
-    const stage = s.stage
+    // A finished run is history: only the turn that finished it, and a re-check, still run on its models and count toward it.
+    if (!s || (s.stage === 'done' && !s.rechecking && !closingTurn)) return yield* next(e)
+    const stage = s.stage === 'done' && s.rechecking ? 'accept' : s.stage // a re-check is acceptance work, whatever the run's stage says
     const model = modelFor(stage)
     const result = yield* next(model ? { ...e, model } : e)
     if (result.usage) {
@@ -1310,11 +1542,28 @@ export const register: Register = (on, options) => {
     return result
   })
 
+  // The main turn that finished the run has ended: its last tokens go into the ledger, the Done
+  // span closes, the stats entry and the report page are redone with the report now on disk.
+  on('turn.complete', async ($, e, next) => {
+    try {
+      return await next(e)
+    } finally {
+      if (e.agentId === undefined && closingTurn) {
+        closingTurn = false
+        try {
+          await mutate($, edit(s => {
+            if (s.stage === 'done' && s.timeline?.done) s.timeline.done = { ...s.timeline.done, endedAt: Date.now() }
+          }), { action: CLOSE })
+        } catch { /* the run stays as stage done left it */ }
+      }
+    }
+  })
+
   // The pane stays true even when the agent forgets the ledger: a subagent spawned for a ticket
   // marks it running, and what the subagent reports back moves it on. Pause and budget hold here too.
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     const s = await read($, run)
-    const seen = s && s.stage === 'build' ? ticketIn(s, `${e.description ?? ''}\n${e.prompt ?? ''}`) : null
+    const seen = s && s.stage === 'build' ? ticketIn(s, e.description ?? '', e.prompt ?? '') : null
     if (!seen) return next(e)
     const { ticket, role } = seen
     if (role === 'executor' && ticket.status !== 'running') {
@@ -1332,12 +1581,12 @@ export const register: Register = (on, options) => {
       }))
     }
     const result = await next(e)
-    const verdict = verdictOf(result)
+    const verdict = verdictOf(result, role)
     if (verdict) {
       await mutate($, edit(x => {
         const t = x.tickets.find(y => y.id === ticket.id)
         if (!t || t.status === 'done' || t.status === 'failed') return
-        if (verdict === 'BLOCKED') { addLog(x, `${t.id} blocked, the subagent needs a decision`); return }
+        if (verdict === 'BLOCKED') { addLog(x, role === 'reviewer' ? `${t.id} review found blocking issues; back for a fix` : `${t.id} blocked, the subagent needs a decision`); return }
         if (role === 'executor' && t.review && t.status === 'running') { t.status = 'review'; t.changedAt = Date.now(); addLog(x, `${t.id} built, waiting for review · ${t.title}`) }
         else if (role === 'executor' && !t.review) { t.status = 'done'; t.changedAt = Date.now(); addLog(x, `${t.id} done · ${t.title} (subagent reported ${verdict})`) }
         else if (role === 'reviewer' && verdict === 'DONE') { t.status = 'done'; t.changedAt = Date.now(); addLog(x, `${t.id} done · ${t.title} (review passed)`) }
@@ -1367,7 +1616,7 @@ export const register: Register = (on, options) => {
           delete x.pending
           addLog(x, 'Answers received')
         }))
-        await recordAnswers($, questions, result)
+        await queued(() => recordAnswers($, questions, result))
       }
     }
   }).catch(($, e, next) => next(e)) // the mirror failed: the tool call itself still goes through
@@ -1395,7 +1644,8 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           <Text bold>Briefproof</Text>
           <Text dimColor>No run in this folder yet.</Text>
-          <Text dimColor>Start one with /briefproof:build &lt;what to build&gt;.</Text>
+          <Text dimColor>Start one with /briefproof:build &lt;what to build&gt;,</Text>
+          <Text dimColor>or /briefproof:adopt in a project that already exists.</Text>
         </Box>
       )
     }
@@ -1407,12 +1657,12 @@ export const register: Register = (on, options) => {
     const delivered = live.filter(r => r.status === 'done').length
 
     // ── the scene: a square capybara for the stage, and a caption beside it ──
-    const pad = (n: number) => NBSP.repeat(Math.max(0, n))
+    const indent = (n: number) => NBSP.repeat(Math.max(0, n))
     const art = (row: string, x: number, color = 'claude') => {
       const [pre, post] = row.split('@')
       return (
         <Text color={color} wrap="truncate-end">
-          {pad(x)}{(pre ?? '').replaceAll(' ', NBSP)}
+          {indent(x)}{(pre ?? '').replaceAll(' ', NBSP)}
           {post !== undefined && <Text color="text">•</Text>}
           {(post ?? '').replaceAll(' ', NBSP)}
         </Text>
@@ -1420,6 +1670,9 @@ export const register: Register = (on, options) => {
     }
     const seed = s.log.length
     const working = lanes.length > 0 && s.stage === 'build'
+    const adopt = s.kind === 'adopt'
+    const broken = s.requirements.filter(r => r.status === 'broken')
+    const stale = s.stage === 'done' ? await read($, drift) : null
     const moment =
       s.stage === 'done' ? 'done'
       : s.pending ? 'waiting'
@@ -1427,22 +1680,28 @@ export const register: Register = (on, options) => {
       : working ? 'build'
       : s.stage === 'build' ? 'between'
       : s.stage
+    const adoptTitles: Record<string, string> = { preflight: 'Reading the project', manifest: 'Writing down what it does', briefing: 'Checking it with you', accept: 'Verifying each line in the code' }
+    const buildTitles: Record<string, string> = { preflight: 'Reading the brief', manifest: 'Copying your words', briefing: 'Working out what to ask', spec: 'Writing the spec', plan: 'Cutting tickets', accept: 'Blind check in progress' }
     const title =
-      moment === 'done' ? `All done · ${delivered}/${live.length} requirements delivered`
+      moment === 'done' ? (s.rechecking ? 'Re-check in progress' : broken.length ? `${broken.length} requirement${broken.length > 1 ? 's' : ''} no longer hold${broken.length === 1 ? 's' : ''}` : stale ? `${stale.reqs.length} may be stale` : adopt ? `Adopted · ${delivered}/${live.length} requirements verified` : `All done · ${delivered}/${live.length} requirements delivered`)
       : moment === 'waiting' ? 'Waiting for you'
       : moment === 'paused' ? 'Paused'
       : moment === 'build' ? `${lanes.length} at work`
       : moment === 'between' ? 'Between tickets'
-      : ({ preflight: 'Reading the brief', manifest: 'Copying your words', briefing: 'Working out what to ask', spec: 'Writing the spec', plan: 'Cutting tickets', accept: 'Blind check in progress' } as Record<string, string>)[moment] ?? LABELS[s.stage] ?? s.stage
+      : (adopt ? adoptTitles : buildTitles)[moment] ?? LABELS[s.stage] ?? s.stage
     const detail =
       moment === 'waiting' ? `${s.pending!.questions.length} question${s.pending!.questions.length > 1 ? 's' : ''} in the dialog`
       : moment === 'build' ? lanes.map(t => `${t.title}${t.status === 'review' ? ' (review)' : ''}`).join(' · ')
+      : moment === 'done' && s.rechecking ? (stale ? `a stranger re-verifies ${stale.reqs.join(', ')}` : 'a stranger re-verifies the requirements')
+      : moment === 'done' && broken.length ? broken.map(r => r.id).join(', ')
+      : moment === 'done' && stale ? `${stale.reqs.join(', ')} · ${stale.changed.length} file${stale.changed.length > 1 ? 's' : ''} changed since the last check`
       : null
+    const quipKey = moment === 'done' && s.rechecking ? 'accept' : moment === 'done' && broken.length ? 'broken' : moment === 'done' && stale ? 'stale' : adopt && QUIPS[`adopt:${moment}`] ? `adopt:${moment}` : moment
     const caption = (
       <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-        <Text bold color={moment === 'done' ? 'success' : moment === 'build' ? 'claude' : undefined} wrap="truncate-end">{title}</Text>
+        <Text bold color={moment === 'done' ? (s.rechecking ? 'claude' : broken.length ? 'error' : stale ? 'warning' : 'success') : moment === 'build' ? 'claude' : undefined} wrap="truncate-end">{title}</Text>
         {detail && <Text dimColor wrap="truncate-end">{detail}</Text>}
-        <Text dimColor wrap="wrap">{quip(moment, seed)}</Text>
+        <Text dimColor wrap="wrap">{quip(quipKey, seed)}</Text>
       </Box>
     )
 
@@ -1450,13 +1709,13 @@ export const register: Register = (on, options) => {
     let picture
     if (!isTerminal && Svg) {
       const source =
-        moment === 'done' ? onsenSvg()
+        moment === 'done' ? (s.rechecking || stale ? sceneSvg('sit', 'lens') : broken.length ? sceneSvg('sit', 'none') : onsenSvg())
         : moment === 'waiting' ? sceneSvg('sit', 'question')
         : moment === 'paused' ? sceneSvg('nap', 'none')
         : moment === 'build' ? herdSvg(lanes.map(t => ({ slow: t.status === 'review' })))
         : sceneSvg('sit', STAGE_PROP[s.stage] ?? 'none')
       const alt =
-        moment === 'done' ? 'A capybara soaking in a hot spring with a yuzu'
+        moment === 'done' ? (s.rechecking ? 'A capybara with a magnifying glass: re-check in progress' : broken.length ? 'A capybara out of the water: a requirement broke' : stale ? 'A capybara with a magnifying glass: files changed since the last check' : 'A capybara soaking in a hot spring with a yuzu')
         : moment === 'waiting' ? 'A capybara waiting with a question'
         : moment === 'paused' ? 'A napping capybara'
         : moment === 'build' ? `${lanes.length} capybara${lanes.length > 1 ? 's' : ''} running`
@@ -1465,7 +1724,10 @@ export const register: Register = (on, options) => {
     } else {
       // Terminal: text art in the same spot, moved by the tick.
       let rows
-      if (moment === 'done') {
+      if (moment === 'done' && (broken.length || stale || s.rechecking)) {
+        const mark = s.rechecking || stale ? '⌕' : '✗'
+        rows = [<Text color={s.rechecking ? 'claude' : broken.length ? 'error' : 'warning'}>{indent(11)}{mark}</Text>, ...SIT.map((row, i) => art(row, 0, i === 3 ? 'inactive' : 'claude'))]
+      } else if (moment === 'done') {
         const steam = tick % 2 === 0 ? '  ∿ ∿ ∿ ' : '   ∿ ∿ ∿'
         rows = [<Text color="inactive">{steam.replaceAll(' ', NBSP)}</Text>, ...ONSEN.map(row => art(row, 0)), <Text color="suggestion">{'≈'.repeat(14)}</Text>]
       } else if (moment === 'build') {
@@ -1474,7 +1736,7 @@ export const register: Register = (on, options) => {
       } else {
         const mark = moment === 'waiting' ? '?' : moment === 'paused' ? 'z' : ({ preflight: '▤', manifest: '✎', briefing: '…', spec: '◎', plan: '▥', accept: '⌕', between: '·' } as Record<string, string>)[moment] ?? '·'
         const bob = tick % 4 < 2 ? `  ${mark}` : `   ${mark}`
-        rows = [<Text color="inactive">{pad(11)}{bob.replaceAll(' ', NBSP)}</Text>, ...SIT.map((row, i) => art(row, 0, i === 3 ? 'inactive' : 'claude'))]
+        rows = [<Text color="inactive">{indent(11)}{bob.replaceAll(' ', NBSP)}</Text>, ...SIT.map((row, i) => art(row, 0, i === 3 ? 'inactive' : 'claude'))]
       }
       picture = <Box flexDirection="column" width={16}>{rows}</Box>
     }
@@ -1531,7 +1793,7 @@ export const register: Register = (on, options) => {
             {s.project}
             {s.paused && <Text color="warning">  · paused</Text>}
           </Text>
-          <Text dimColor>{s.kind === 'change' ? 'change request · ' : ''}{s.mode === 'auto' ? 'auto' : 'ask'} mode · started {clock(s.startedAt)}</Text>
+          <Text dimColor>{s.kind === 'change' ? 'change request · ' : adopt ? 'adopted project · ' : ''}{s.mode === 'auto' ? 'auto' : 'ask'} mode · started {clock(s.startedAt)}</Text>
           {s.kind === 'change' && s.request && <Text dimColor wrap="wrap">“{s.request}”</Text>}
         </Box>
 
@@ -1542,8 +1804,44 @@ export const register: Register = (on, options) => {
               <Text dimColor>  at {LABELS[s.stage] ?? s.stage}{tickets.length ? ` · ${done} of ${tickets.length} tickets done` : ''}</Text>
             </Text>
             <Box>
-              <Button key="resume-run" variant="primary" hotkey="r" label="Resume the run" onPress={() => resumeRun($)} />
+              <Button key="resume-run" variant="primary" hotkey="r" label={adopt ? 'Resume the adoption' : 'Resume the run'} onPress={() => resumeRun($)} />
             </Box>
+          </Box>
+        )}
+
+        {s.stage === 'done' && (stale || broken.length > 0) && (
+          <Box flexDirection="column" gap={1}>
+            {broken.length > 0 && (
+              <Box flexDirection="column">
+                <Text>
+                  <Text bold color="error">No longer holds</Text>
+                  <Text dimColor>  checked {s.proof ? clock(s.proof.at) : 'just now'}</Text>
+                </Text>
+                {broken.map(r => (
+                  <Text wrap="truncate-end">
+                    <Text color="error">✗</Text>  {r.quote}
+                    <Text dimColor>  {r.id}{r.note ? ` · ${r.note}` : ''}</Text>
+                  </Text>
+                ))}
+                <Text dimColor wrap="wrap">Fix it with /briefproof:change, in your words; the checker verifies the fix and the rest.</Text>
+              </Box>
+            )}
+            {stale && (
+              <Box flexDirection="column">
+                <Text>
+                  <Text bold color="warning">Changed since the last check</Text>
+                  <Text dimColor>  {stale.changed.length} file{stale.changed.length > 1 ? 's' : ''} · {stale.reqs.join(', ')} may be stale</Text>
+                </Text>
+                {stale.changed.slice(0, 5).map(f => <Text dimColor wrap="truncate-end">{NBSP.repeat(3)}{f}</Text>)}
+                {stale.changed.length > 5 && <Text dimColor>{NBSP.repeat(3)}and {stale.changed.length - 5} more</Text>}
+              </Box>
+            )}
+            {stale && !s.rechecking && (
+              <Box>
+                <Button key="recheck" variant="primary" hotkey="k" label="Re-check" onPress={() => recheckRun($)} />
+              </Box>
+            )}
+            {s.rechecking && <Text dimColor>Re-check in progress; the list clears when it snapshots.</Text>}
           </Box>
         )}
 
@@ -1701,12 +1999,12 @@ export const register: Register = (on, options) => {
               <Box gap={1}>
                 {(await $.fs.exists(reportHtml(got.dir))) && (
                   <Button key="open-report" variant="primary" label="Open report page" onPress={async () => {
-                    const ok = await openFolder($, `${got.root}/8-report/report.html`)
+                    const ok = await openPath($, `${got.root}/8-report/report.html`)
                     $.ui.toast(ok ? 'Opened the report' : `Couldn\u2019t open it here; it is at ${got.root}/8-report/report.html`)
                   }} />
                 )}
                 <Button key="open-folder" variant={(await $.fs.exists(reportHtml(got.dir))) ? undefined : 'primary'} label="Open folder" onPress={async () => {
-                  const ok = await openFolder($, got.root)
+                  const ok = await openPath($, got.root)
                   $.ui.toast(ok ? 'Opened the run folder' : `Couldn\u2019t open it here; the path is ${got.root}`)
                 }} />
                 <Button key="copy-path" label="Copy path" onPress={async press => {

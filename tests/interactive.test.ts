@@ -48,8 +48,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await call({ action: 'init', project: 'Massage booking' })
 
     const asking = $.tool.call({ tool: 'AskUserQuestion', questions: [
-      { question: 'Where should it run?', header: 'Hosting', options: [{ label: 'Vercel' }, { label: 'Netlify' }], multiSelect: false },
-      { question: 'Should clients pay when booking?', header: 'Payment', options: [{ label: 'No' }, { label: 'Card payment' }], multiSelect: false },
+      { question: 'Where should it run?', header: 'Hosting', options: [{ label: 'Vercel', description: 'Zero config' }, { label: 'Netlify', description: 'Also fine' }], multiSelect: false },
+      { question: 'Should clients pay when booking?', header: 'Payment', options: [{ label: 'No', description: 'Pay at the studio' }, { label: 'Card payment', description: 'Needs a payment provider' }], multiSelect: false },
     ] })
     await clock.settle()
 

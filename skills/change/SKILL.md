@@ -26,7 +26,11 @@ state {action: "init", kind: "change", request: "<the user's words, verbatim>", 
 ```
 
 The ledger refuses when this folder has no finished run (tell the user to run
-`/briefproof:build` first) or when the run is unfinished (resume it instead).
+`/briefproof:build` for a new project, or `/briefproof:adopt` for one that
+already exists) or when the run is unfinished (resume it instead). A finished
+adoption is a base run like any other; its brief is what the project did when
+it was adopted, and a requirement marked `broken` there is fair game for the
+request.
 On success it creates a new run folder, `{run}`, and names the base run,
 `{base}`. The mod has already written:
 
@@ -67,11 +71,16 @@ shorter.
    sentence of the Change request section as the brief; then, for each line of
    base-requirements.md, confirm it still holds with one quick check each and
    report any that broke.* A broken base requirement is a fix ticket before
-   anything else. Save the reply as `{run}/7-acceptance/acceptance.md`. `gate G4`.
-8. **Report.** `{run}/8-report/report.md`: what changed and why, the new `R##`
-   table, the regression result (N of N base requirements still hold), anything
+   anything else. Save the reply as `{run}/7-acceptance/acceptance.md`. Then
+   record the evidence for each new requirement:
+   `set_requirement {id, status: "done", files: [<its FILES line>], note: "<evidence>"}`.
+   The pane watches those files afterwards, together with the base run's: when
+   this run finishes, the proof covers the whole chain. `gate G4`.
+8. **Report.** `stage done` first, so the report and project memory are written
+   on the Done model; the mod rewrites the report page when this turn ends. Then
+   `{run}/8-report/report.md`: what changed and why, the new `R##` table, the regression result (N of N base requirements still hold), anything
    deferred, and the usage table from `show`. Update `AGENTS.md` if how to run
-   or test changed. `stage done`.
+   or test changed.
 
 ## Red flags
 

@@ -8,7 +8,7 @@
     {
       "name": "briefproof",
       "source": "./",
-      "description": "Build a project from a plain-language brief, with a live progress pane"
+      "description": "Build a project from a plain-language brief, or adopt one you already have; a live pane, a blind check, and a warning when the proof goes stale"
     }
   ]
 }

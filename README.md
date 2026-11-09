@@ -72,6 +72,32 @@ still holds. Each run, build or change, lives in its own folder under
 `.briefproof/runs/`, so the history of a project is a list of briefs and
 reports.
 
+### A project you already have
+
+```
+/briefproof:adopt
+```
+
+Almost nobody starts from an empty folder, and `change` needs a finished run to
+stand on. Adopt gives an existing project one. It reads the code (not the
+README), writes the brief the project never had as plain sentences a user could
+see it do, quotes them into numbered requirements, asks you to correct the list
+once, then has a blind checker verify each line in a clean copy and write down
+the files it lives in. Nothing in the project changes. From then on
+`/briefproof:change` works on it like on anything Briefproof built, and a README
+promise that nothing in the code backs is marked "no longer holds" rather than
+quietly passed.
+
+### When the proof goes stale
+
+The acceptance check records, for every requirement, the files where it found
+that behaviour. Open Claude Code later in that folder and, if any of those files
+changed, the pane says so: which files, which requirements may be stale, and a
+**Re-check** button. The re-check (`/briefproof:recheck`) runs the blind checker
+on just those requirements, marks what still holds and what broke, and retakes
+the snapshot. Nothing is fixed behind your back; a broken requirement is a line
+in the pane and a `/briefproof:change` away.
+
 ## How it works
 
 Your brief becomes numbered requirements, quoted word for word. Briefproof asks
@@ -90,6 +116,7 @@ A few rules make this trustworthy, and I didn't bend any of them:
 | **Boundaries come before tickets** | `interfaces.md` is written from the whole spec, so the first ticket doesn't quietly decide the architecture. |
 | **Review where it pays** | Foundation and risky tickets get a review, plus one pass over the whole branch. At most two fix rounds, so the cost stays predictable. |
 | **Changes keep the proof** | A change request is a small run on top of a finished one: quoted requirements, a spec delta, and a blind check of the request plus a regression pass over what the base run delivered. |
+| **The proof knows when it is stale** | Every verified requirement names the files it lives in. When one changes, the pane says which requirements may be stale and offers a re-check; "verified" never silently outlives the code it was true of. |
 | **Tickets run in waves** | Each ticket owns its files. Tickets that don't overlap run in parallel, three at a time; the ones that share files wait their turn. |
 | **Gates the agent can't talk its way past** | The run ledger refuses to mark a gate passed while it still has a problem: an open requirement, a ticket that traces to nothing. |
 | **Safe by default** | It never asks for secret values, and always asks before deploying, paying, sending or deleting. |
@@ -141,6 +168,11 @@ So now there's a capybara, and it tells you.
   **Open report page** is the first button in What you got.
 - **It tells you when it needs you.** A desktop notification when questions are
   waiting, a short message as each ticket finishes.
+- **It tells you when the proof moved.** Open a finished project and, if files
+  behind a verified requirement changed since the last check, the pane lists
+  them, names the requirements that may be stale, and offers **Re-check**. A
+  requirement that broke stays visible as "no longer holds" until a change run
+  fixes it.
 - **When it's done, it shows you what you got.** One line per stage folder in
   `.briefproof/` with its file count, an **Open folder** button (Finder, Explorer,
   or your desktop's file manager) and **Copy path**. In the terminal the names
@@ -211,8 +243,9 @@ claude plugin eval . --trust-plugin --tag build --allow-tools Bash Write Edit Ag
 
 The build cases give the run a shell, so Claude Code needs its sandbox: on
 Linux that is `bubblewrap` and `socat` (`apt install bubblewrap socat`); macOS
-has one built in. The GitHub Action validates and tests on every push, and runs
-the evals weekly and on demand (it needs an `ANTHROPIC_API_KEY` secret).
+has one built in. The GitHub Action validates the plugin and runs the tests on
+every push, so a broken commit is caught before anyone updates; the evals cost
+real tokens, so they run by hand, not in CI.
 
 Pull requests are welcome. The screenshots in `docs/` are rendered from the
 mod's own SVG into a mock of the pane layout; if you have a capture from a real
@@ -226,7 +259,7 @@ skills/build/SKILL.md            the orchestrator (/briefproof:build)
 skills/build/prompts/            executor + reviewer, coverage (G2), acceptance (G4)
 skills/change/                   change requests on a finished run (/briefproof:change)
 evals/                           claude plugin eval cases
-.github/workflows/check.yml      validate + tests on push; evals weekly
+.github/workflows/check.yml      validate + tests on every push
 hooks/register.tsx               the mod: state tool, live pane, capybaras, model routing
 types/index.d.ts                 the run-state contract
 tests/                           claude plugin test .

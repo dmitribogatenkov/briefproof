@@ -16,10 +16,15 @@ Do not read anything under `.briefproof/` except the brief you were given.
 2. Run the test suite.
 3. For each requirement in the brief, try it for real (run the app, call the
    endpoint, send the message to a stubbed adapter) and record what happened.
+   For each one, name the files where that behaviour lives: the module that
+   implements it and, if there is one, the test that covers it. One to five
+   files, relative to the project root, never dependencies or build output.
 
 Reply:
 - `RUNS:` yes/no, and the exact command that failed if no.
 - `REQUIREMENTS:` one line each: `✓` / `✗` / `~partial`, the brief's words, and
   the evidence (command + observed result).
+- `FILES:` one line per requirement: its first words, then the files,
+  comma-separated.
 - `DOCS:` README problems.
-Under 40 lines. Do not fix anything.
+Under 50 lines. Do not fix anything.

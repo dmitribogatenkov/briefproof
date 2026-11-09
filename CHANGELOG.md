@@ -4,6 +4,85 @@ All notable changes to Briefproof. The version is the `version` field in
 `.claude-plugin/plugin.json`; `claude plugin update briefproof@briefproof` picks
 up a new one.
 
+## 0.10.0 · 2026-11-07
+
+The proof outlives the run: it works on projects you did not build with
+Briefproof, and it tells you when it goes stale.
+
+### Added
+- **Adopt an existing project.** `/briefproof:adopt` reads the code, writes the
+  brief the project never had (plain sentences a user could see it do), quotes
+  them into numbered requirements, asks you to correct the list once, then has a
+  blind checker verify each line in a clean copy and record the files it lives
+  in. Five stages, no tickets, nothing in the project changes. The result is a
+  finished run, so `/briefproof:change` works on the project from then on. A
+  README promise the checker cannot find is recorded as not holding, never
+  passed.
+- **Evidence per requirement.** The acceptance check now names the files behind
+  each requirement; the skill records them with
+  `set_requirement {files, note}`. They appear in `requirements.md`, in the
+  report page under each quote, and in `state.json`.
+- **Proof drift.** When a run finishes, the ledger hashes those files
+  (`state.json` → `proof`). Opening Claude Code in the folder later compares
+  them: the pane lists what changed, names the requirements that may be stale,
+  says so in the status line and in `show`, and offers **Re-check**.
+- **Re-check.** `/briefproof:recheck` (the pane's button) runs the blind checker
+  on the stale requirements, marks each as still holding or `broken`, saves the
+  reply as `7-acceptance/recheck-<stamp>.md`, and the new `snapshot` ledger
+  action retakes the proof so the warning clears. Nothing is fixed behind your
+  back; a broken requirement stays visible until a change run fixes it.
+- A `broken` requirement status: it held once and no longer does, or was claimed
+  and not found. Shown in red in the pane and the report; counts as not
+  delivered.
+- An eval case: `/briefproof:adopt` on an empty folder must stop and point to
+  `/briefproof:build`.
+
+### Changed
+- `init` accepts `kind: "adopt"`; `stage` only accepts the run's own stages, so
+  an adoption cannot wander into Spec or Build; `add_tickets` refuses on an
+  adopted project.
+- The report page is rewritten after a re-check, and its footer says when the
+  evidence was last checked.
+- The empty pane mentions `/briefproof:adopt`; a bare `/briefproof:build` in a
+  folder with code but no run offers it too.
+- CI validates the plugin and runs the tests on every push, and nothing else:
+  the weekly eval schedule is gone, since the evals cost real tokens and need
+  an API key in the repo. They run by hand (README, Contributing).
+- `stage done` now comes first in the report step of build, change and adopt, so
+  the report and `AGENTS.md` are written on the Done model the settings name.
+  The report page is rewritten when that turn ends.
+
+### Fixed
+- A finished run kept routing every later request in its folder to the Done
+  model and counting the tokens as its own. Only the turn that finishes the run,
+  and a re-check, do that now.
+- A change request that failed half-way pointed `.briefproof/current` at an empty
+  folder: the finished run vanished from `show` and the request could not be
+  retried. The pointer is now written last.
+- A reviewer's reply that listed a blocking issue and mentioned "DONE" closed the
+  ticket. An executor's `DONE` whose notes mentioned "BLOCKED" read as blocked,
+  and "not DONE yet" read as done. Verdicts are now read the way the prompts ask
+  for them: the executor's verdict line, the reviewer's `BLOCKING:` section.
+- A spawn could be matched to a ticket the prompt only mentioned as a
+  dependency, a description with "review" in it made a reviewer, and tickets
+  past T99 were never matched.
+- Going back to a stage lost the time of the second visit.
+- Finishing a run twice added two entries to the stats the estimate learns from.
+- G2 and G4 checked nothing. G2 now refuses while a requirement is still open,
+  and G4 refuses while a live requirement is neither `done` nor `broken`.
+- After the budget limit changed, crossing the new one sent no notification, and
+  an earlier "Continue anyway" waived it too.
+- A requirement kept its "deferred" reason after going back to open, which let
+  it pass G1 unexplained.
+- Two requirements added from the pane in quick succession could lose one line
+  of the brief. In a change run they landed under the change request instead of
+  `## Additions`.
+- A quote with a line break broke the table in `requirements.md`.
+- Token counts: 999,999 showed as "1000k" and 9,999 as "10.0k".
+- The report page: a `######` heading became `<h7>`, and the mode and model
+  names went in unescaped.
+- The dialog's answers file is written in the same queue as the ledger.
+
 ## 0.9.0 · 2026-11-01
 
 It works on the project you already have.

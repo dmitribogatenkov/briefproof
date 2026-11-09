@@ -24,12 +24,17 @@ Do not read anything under `.briefproof/` except those two files.
 4. For each line of the base requirements, make one quick check that it still
    holds. You are looking for what the change broke, not re-testing everything
    in depth.
+5. For each sentence of the change request, name the files where that behaviour
+   now lives (module and test): one to five, relative to the project root, never
+   dependencies or build output.
 
 Reply:
 - `RUNS:` yes/no, and the exact command that failed if no.
 - `CHANGE:` one line per sentence of the change request: `✓` / `✗` /
   `~partial`, the words, and the evidence (command + observed result).
+- `FILES:` one line per sentence of the change request: its first words, then
+  the files, comma-separated.
 - `REGRESSION:` `N of M base requirements still hold`, then one line per `✗`
   with the evidence.
 - `DOCS:` README problems.
-Under 40 lines. Do not fix anything.
+Under 50 lines. Do not fix anything.

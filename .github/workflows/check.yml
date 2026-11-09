@@ -1,19 +1,22 @@
 name: check
 
+# `claude plugin update` pulls straight from main, so every push is checked
+# before anyone updates: the manifest validates and the mod's tests pass.
+# The eval suite under evals/ calls the model and costs money; run it by hand
+# (see README, Contributing) when a skill changes.
+
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: '17 6 * * 1'   # Mondays, 06:17 UTC
 
 jobs:
   validate-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       - name: Install Claude Code
@@ -22,35 +25,3 @@ jobs:
         run: claude plugin validate --strict .
       - name: Run the mod's tests
         run: claude plugin test .
-
-  # The eval suite calls the model, so it runs on demand and on a schedule, not on every push.
-  evals:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm install -g @anthropic-ai/claude-code
-      - name: Sandbox for runs that get a shell
-        run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap socat
-      - name: Cheap cases on every run
-        run: >
-          claude plugin eval . --trust-plugin --no-publish
-          --tag negative --tag refusal --runs 2 --ablation none --allow-tools mcp__briefproof__state
-          --threshold 0.8 --max-cost-usd 3 --json evals-cheap.json
-      - name: Full build cases
-        run: >
-          claude plugin eval . --trust-plugin --no-publish
-          --tag build --runs 1 --allow-tools Bash Write Edit Agent mcp__briefproof__state
-          --threshold 0.8 --max-cost-usd 40 --json evals-build.json
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: eval-results
-          path: |
-            evals-*.json
-            evals/results/

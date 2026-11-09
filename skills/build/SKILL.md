@@ -172,11 +172,18 @@ The user resumes from the pane; do not retry on your own.
 ### 7 · Acceptance
 **Gate G4:** clone the repo to a temp dir, then spawn a fresh subagent with
 `prompts/acceptance.md`, giving it *only* `brief.md` and the clone. It installs,
-runs and checks each sentence of the brief. Save its full reply, unedited, as
-`{run}/7-acceptance/acceptance.md` (append the re-check's reply below it). Every gap
-becomes a fix ticket; re-check once. `gate G4`.
+runs and checks each sentence of the brief, and names the files each one lives
+in. Save its full reply, unedited, as `{run}/7-acceptance/acceptance.md` (append
+the re-check's reply below it). Every gap becomes a fix ticket; re-check once.
+Then record the evidence, one call per requirement:
+`set_requirement {id, status: "done", files: [<its FILES line>], note: "<its evidence, one line>"}`.
+Those files are what Briefproof watches afterwards: when one changes, the pane
+names the requirements that may be stale and offers a re-check. Never mark a
+requirement `done` without the checker's `✓`. `gate G4`.
 
 ### 8 · Report
+`stage done` first, so the report and project memory are written on the Done
+model; the mod rewrites the report page when this turn ends.
 Compose from files re-read from disk, not from memory. In plain language:
 what was built and how to run it; requirement table (R##, quote, status);
 *Assumptions* (in auto mode); env var names still empty; anything deferred;
@@ -187,7 +194,7 @@ every choice you made instead of asking, one line each. The pane lists the stage
 folders when the run is done, with buttons that open the run folder and the
 report page.
 Write `AGENTS.md` (project memory: how to run, test, where things are; pointers,
-not prose) unless the user already has one. `stage done`.
+not prose) unless the user already has one.
 
 ## Red flags: stop and redo the stage
 
@@ -201,6 +208,9 @@ not prose) unless the user already has one. `stage done`.
 
 A bare `/briefproof:build` when the run in this folder is already done: say so in
 one line and offer `/briefproof:change <what to change>` or `/briefproof:build
-<a new brief>`; do not start anything. With an unfinished run: call `show`, re-read
+<a new brief>`; do not start anything. If `show` prints a `drift:` line, mention
+that files behind some requirements changed and `/briefproof:recheck` verifies
+them. `/briefproof:build` in a folder that already has a project but no run:
+offer `/briefproof:adopt`, which writes the brief the project never had. With an unfinished run: call `show`, re-read
 `1-brief/brief.md`, `4-spec/interfaces.md` and the current stage's files, then continue.
 After a context compaction, do the same: re-read state, not this whole file.
