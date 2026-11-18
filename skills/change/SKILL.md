@@ -72,14 +72,18 @@ shorter.
    base-requirements.md, confirm it still holds with one quick check each and
    report any that broke.* A broken base requirement is a fix ticket before
    anything else. Save the reply as `{run}/7-acceptance/acceptance.md`. Then
-   record the evidence for each new requirement:
-   `set_requirement {id, status: "done", files: [<its FILES line>], note: "<evidence>"}`.
+   record the evidence for each new requirement, as in the build skill: `✓` →
+   `set_requirement {id, status: "done", files: [<its FILES line>], note: "<evidence>"}`;
+   `~partial` → `status: "partial"` with the checker's words for the part it did
+   not see or could not try as the note (a fix ticket first if that part can be
+   fixed); still `✗` after the re-check → `status: "broken"`. Never turn a
+   `~partial` into `done` yourself.
    The pane watches those files afterwards, together with the base run's: when
    this run finishes, the proof covers the whole chain. `gate G4`.
 8. **Report.** `stage done` first, so the report and project memory are written
    on the Done model; the mod rewrites the report page when this turn ends. Then
    `{run}/8-report/report.md`: what changed and why, the new `R##` table, the regression result (N of N base requirements still hold), anything
-   deferred, and the usage table from `show`. Update `AGENTS.md` if how to run
+   deferred, every `partial` or `broken` requirement with the checker's words, and the usage table from `show`. Update `AGENTS.md` if how to run
    or test changed.
 
 ## Red flags

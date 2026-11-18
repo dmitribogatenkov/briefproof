@@ -102,12 +102,13 @@ Save its reply unedited as `{run}/7-acceptance/acceptance.md`. Then, per line:
   from the brief, or keep it as not working?”* **Drop** (their words become the
   reason) or **Keep as broken**. In auto mode: `status: "broken"` with the
   evidence as the note. Never mark done what the checker did not see.
-- `~partial` → treat as `✗`, and put the checker's words in the note.
+- `~partial` → `set_requirement {id, status: "partial", files: [<its FILES>], note: "<the checker's words for the part it did not see or could not try>"}`.
+  Do not ask and do not round it up: the pane shows it as "partly verified".
 
 The files you record are what Briefproof watches from now on: when one changes,
 the pane says which requirements may be stale and offers a re-check. Record 1 to
 5 files per requirement, relative to the project root, never `node_modules` or
-build output. `gate G4 pass` when every live requirement is `done` or `broken`.
+build output. `gate G4 pass` when every live requirement is `done`, `partial` or `broken`.
 
 ### 5 · Done
 

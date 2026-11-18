@@ -38,7 +38,7 @@ const LABELS: Record<string, string> = {
   preflight: 'Preflight', manifest: 'Manifest', briefing: 'Briefing', spec: 'Spec',
   plan: 'Plan', build: 'Build', accept: 'Acceptance', done: 'Done',
 }
-const REQ_STATUS = ['open', 'in-spec', 'done', 'deferred', 'dropped', 'broken']
+const REQ_STATUS = ['open', 'in-spec', 'done', 'partial', 'deferred', 'dropped', 'broken']
 const TICKET_STATUS = ['todo', 'running', 'review', 'done', 'failed']
 const GATES = ['G1', 'G2', 'G3', 'G4']
 const ADOPT_GATES = ['G1', 'G4']
@@ -74,7 +74,7 @@ const INPUT_SCHEMA = {
     stage: { type: 'string', enum: [...STAGES] },
     quotes: { type: 'array', items: { type: 'string' } },
     id: { type: 'string', description: 'R## or T##' },
-    status: { type: 'string', description: `requirement: ${REQ_STATUS.join('|')} (broken: it held once and no longer does, or was claimed and not found); ticket: ${TICKET_STATUS.join('|')}` },
+    status: { type: 'string', description: `requirement: ${REQ_STATUS.join('|')} (partial: the checker saw part of it, or could not try it for real; needs note. broken: it held once and no longer does, or was claimed and not found); ticket: ${TICKET_STATUS.join('|')}` },
     reason: { type: 'string', description: "for deferred/dropped: the user's own words" },
     files: { type: 'array', items: { type: 'string' }, description: 'set_requirement: the project files (relative paths) where this requirement lives, as the acceptance checker named them; the pane watches them for changes' },
     tickets: {
@@ -131,7 +131,7 @@ export function problems(s: RunState, gate?: string): string[] {
   const covered = new Set(s.tickets.flatMap(t => t.reqs))
   if (s.tickets.length > 0) {
     for (const r of s.requirements) {
-      if ((r.status === 'in-spec' || r.status === 'done') && !covered.has(r.id)) {
+      if ((r.status === 'in-spec' || r.status === 'done' || r.status === 'partial') && !covered.has(r.id)) {
         out.push(`G3 ${r.id} is in the spec but in no ticket`)
       }
     }
@@ -146,7 +146,7 @@ export function problems(s: RunState, gate?: string): string[] {
   }
   if (gate === 'G4') {
     for (const r of live) {
-      if (r.status !== 'done' && r.status !== 'broken') out.push(`G4 ${r.id} is ${r.status}: the blind check has neither verified it (done) nor found it missing (broken)`)
+      if (r.status !== 'done' && r.status !== 'broken' && r.status !== 'partial') out.push(`G4 ${r.id} is ${r.status}: the blind check has neither verified it (done), nor verified part of it (partial), nor found it missing (broken)`)
     }
   }
   return out
@@ -172,6 +172,8 @@ export function summary(s: RunState, st: Stats | null = null, d: Drift | null = 
     if (s.rechecking) lines.push('re-check in progress: finish it with set_requirement per requirement, then snapshot')
     const broken = s.requirements.filter(r => r.status === 'broken')
     if (broken.length) lines.push(`no longer holds: ${broken.map(r => r.id).join(', ')}. Offer /briefproof:change to fix it.`)
+    const partial = s.requirements.filter(r => r.status === 'partial')
+    if (partial.length) lines.push(`partly verified: ${partial.map(r => `${r.id} (${r.note})`).join('; ')}. Say so in the report; never call these done.`)
     if (d && d.changed.length) lines.push(`drift: ${d.changed.length} evidence file${d.changed.length > 1 ? 's' : ''} changed since the last check (${d.changed.slice(0, 6).join(', ')}${d.changed.length > 6 ? ', …' : ''}); ${d.reqs.join(', ')} may be stale. /briefproof:recheck verifies them again.`)
     else if (s.proof) lines.push(`proof: ${Object.keys(s.proof.files).length} evidence files unchanged since ${new Date(s.proof.at).toISOString().slice(0, 16).replace('T', ' ')}`)
   }
@@ -317,6 +319,7 @@ export function apply(prev: RunState | null, e: Record<string, unknown>, live: L
         if (/(^|\/)(node_modules|\.git|dist|build|\.venv|__pycache__)(\/|$)/.test(f)) refuse(`${f} is a dependency or build output, not evidence; name the source file or the test`)
       }
       const note = str(e.note)
+      if (status === 'partial' && !note && !r.note) refuse('partial needs note: the checker\'s own words for the part it did not see or could not try')
       const was = r.status
       r.status = status
       if (reason) r.reason = reason
@@ -327,6 +330,7 @@ export function apply(prev: RunState | null, e: Record<string, unknown>, live: L
       if (status === 'deferred' || status === 'dropped') addLog(s, `${r.id} ${status}`)
       if (status === 'broken' && was !== 'broken') addLog(s, `${r.id} no longer holds${note ? `: ${note}` : ''}`)
       if (status === 'done' && was === 'broken') addLog(s, `${r.id} holds again`)
+      if (status === 'partial' && was !== 'partial') addLog(s, `${r.id} partly verified: ${note ?? r.note}`)
       reply = `${r.id} is ${status}.${files.length ? ` Watching ${files.length} file${files.length > 1 ? 's' : ''} for it.` : ''}`
       break
     }
@@ -581,7 +585,7 @@ export function watchOf(s: RunState, bases: RunState[] = []): { files: string[];
   for (const r of s.requirements) add(r, r.id)
   // A base requirement this run restates (same quote, whatever its status here) is this run's to watch, not the base's twice.
   const here = new Set(s.requirements.map(r => r.quote))
-  for (const b of bases) for (const r of b.requirements) if (r.status === 'done' && !here.has(r.quote)) add(r, `${r.id} (base)`)
+  for (const b of bases) for (const r of b.requirements) if ((r.status === 'done' || r.status === 'partial') && !here.has(r.quote)) add(r, `${r.id} (base)`)
   return { files: Object.keys(reqsOf), reqsOf }
 }
 
@@ -642,6 +646,8 @@ function statusLine(s: RunState, d: Drift | null = null): string {
     if (s.rechecking) return `${base} · re-checking`
     const broken = s.requirements.filter(r => r.status === 'broken').length
     if (broken) return `${base} · ${broken} no longer hold${broken === 1 ? 's' : ''}`
+    const partial = s.requirements.filter(r => r.status === 'partial').length
+    if (partial && !d?.reqs.length) return `${base} · ${partial} partly verified`
     if (d?.reqs.length) return `${base} · ${d.reqs.length} may be stale`
   }
   return base
@@ -1252,7 +1258,7 @@ function clock(ms: number): string {
 const TICKET_MARK: Record<string, string> = { todo: '○', running: '◐', review: '◑', done: '●', failed: '✗' }
 const TICKET_COLOR: Record<string, string> = { running: 'claude', review: 'warning', done: 'success', failed: 'error' }
 const REQ_COLOR: Record<string, string> = {
-  'in-spec': 'suggestion', done: 'success', deferred: 'warning', dropped: 'inactive', open: 'text', broken: 'error',
+  'in-spec': 'suggestion', done: 'success', deferred: 'warning', dropped: 'inactive', open: 'text', broken: 'error', partial: 'warning',
 }
 // ── The report page: one self-contained HTML file a stakeholder can open without Claude Code ──
 
@@ -1331,8 +1337,9 @@ export function reportPage(s: RunState, reportMarkdown: string): string {
   const requests = Object.values(usage).reduce((n, c) => n + c.requests, 0)
   const started = new Date(s.startedAt)
   const ended = s.timeline?.done?.endedAt ?? s.updatedAt
-  const reqRows = s.requirements.map(r => `<tr><td class="id">${r.id}</td><td>${esc(r.quote)}${r.note ? `<div class="why">${esc(r.note)}</div>` : ''}${r.files?.length ? `<div class="why"><code>${r.files.map(esc).join('</code> <code>')}</code></div>` : ''}</td><td><span class="pill ${esc(r.status)}">${esc(r.status === 'broken' ? 'no longer holds' : r.status)}</span>${r.reason ? `<div class="why">you: “${esc(r.reason)}”</div>` : ''}</td></tr>`).join('')
+  const reqRows = s.requirements.map(r => `<tr><td class="id">${r.id}</td><td>${esc(r.quote)}${r.note ? `<div class="why">${esc(r.note)}</div>` : ''}${r.files?.length ? `<div class="why"><code>${r.files.map(esc).join('</code> <code>')}</code></div>` : ''}</td><td><span class="pill ${esc(r.status)}">${esc(r.status === 'broken' ? 'no longer holds' : r.status === 'partial' ? 'partly verified' : r.status)}</span>${r.reason ? `<div class="why">you: “${esc(r.reason)}”</div>` : ''}</td></tr>`).join('')
   const broken = s.requirements.filter(r => r.status === 'broken').length
+  const partial = s.requirements.filter(r => r.status === 'partial').length
   const watched = evidenceFiles(s).length
   const ticketRows = s.tickets.map(t => `<tr><td class="id">${t.id}</td><td>${esc(t.title)}</td><td>${t.reqs.map(esc).join(', ')}</td><td><span class="pill ${esc(t.status)}">${esc(t.status)}</span>${t.review ? ' <span class="muted">reviewed</span>' : ''}</td></tr>`).join('')
   const chart = rows.length ? costSvg(640, rows) : ''
@@ -1352,7 +1359,7 @@ export function reportPage(s: RunState, reportMarkdown: string): string {
   table { width:100%; border-collapse:collapse; font-size:15px } th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top } th { color:var(--muted); font-weight:600; font-size:13px; letter-spacing:.04em; text-transform:uppercase }
   td.id { color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap } .why { color:var(--muted); font-size:13px; margin-top:4px }
   .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; border:1px solid var(--line); color:var(--muted) }
-  .pill.done, .pill.pass { color:var(--ok); border-color:var(--ok) } .pill.failed, .pill.fail, .pill.dropped, .pill.broken { color:var(--err); border-color:var(--err) } .pill.deferred, .pill.pending, .pill.review { color:var(--warn); border-color:var(--warn) } .pill.running, .pill.in-spec { color:var(--claude); border-color:var(--claude) }
+  .pill.done, .pill.pass { color:var(--ok); border-color:var(--ok) } .pill.failed, .pill.fail, .pill.dropped, .pill.broken { color:var(--err); border-color:var(--err) } .pill.deferred, .pill.pending, .pill.review, .pill.partial { color:var(--warn); border-color:var(--warn) } .pill.running, .pill.in-spec { color:var(--claude); border-color:var(--claude) }
   .muted { color:var(--muted) } .report { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:8px 28px 20px; margin-top:12px }
   .report pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px 14px; overflow:auto; font-size:13.5px } code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:.92em }
   .chart { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; overflow-x:auto } .chart svg text { fill: var(--muted) }
@@ -1367,7 +1374,7 @@ export function reportPage(s: RunState, reportMarkdown: string): string {
   <div class="tile"><div class="n">${fmtTokens(total)}</div><div class="l">tokens in ${requests} requests</div></div>
   <div class="tile"><div class="n">${fmtMinutes(ended - s.startedAt)}</div><div class="l">wall clock</div></div>
 </div>
-<p>${gates}${broken ? ` <span class="pill broken">${broken} no longer hold${broken === 1 ? 's' : ''}</span>` : ''}</p>
+<p>${gates}${broken ? ` <span class="pill broken">${broken} no longer hold${broken === 1 ? 's' : ''}</span>` : ''}${partial ? ` <span class="pill partial">${partial} partly verified</span>` : ''}</p>
 <h2>Report</h2>
 <div class="report">${reportMarkdown.trim() ? mdToHtml(reportMarkdown) : '<p class="muted">The agent has not written 8-report/report.md yet.</p>'}</div>
 <h2>Requirements</h2>
@@ -1672,6 +1679,7 @@ export const register: Register = (on, options) => {
     const working = lanes.length > 0 && s.stage === 'build'
     const adopt = s.kind === 'adopt'
     const broken = s.requirements.filter(r => r.status === 'broken')
+    const partly = s.requirements.filter(r => r.status === 'partial')
     const stale = s.stage === 'done' ? await read($, drift) : null
     const moment =
       s.stage === 'done' ? 'done'
@@ -1809,7 +1817,7 @@ export const register: Register = (on, options) => {
           </Box>
         )}
 
-        {s.stage === 'done' && (stale || broken.length > 0) && (
+        {s.stage === 'done' && (stale || broken.length > 0 || partly.length > 0) && (
           <Box flexDirection="column" gap={1}>
             {broken.length > 0 && (
               <Box flexDirection="column">
@@ -1824,6 +1832,18 @@ export const register: Register = (on, options) => {
                   </Text>
                 ))}
                 <Text dimColor wrap="wrap">Fix it with /briefproof:change, in your words; the checker verifies the fix and the rest.</Text>
+              </Box>
+            )}
+            {partly.length > 0 && (
+              <Box flexDirection="column">
+                <Text bold color="warning">Partly verified</Text>
+                {partly.map(r => (
+                  <Text wrap="wrap">
+                    <Text color="warning">~</Text>  {r.quote}
+                    <Text dimColor>  {r.id}{r.note ? ` · ${r.note}` : ''}</Text>
+                  </Text>
+                ))}
+                <Text dimColor wrap="wrap">The checker saw part of each, or could not try it for real. Try these yourself before you rely on them.</Text>
               </Box>
             )}
             {stale && (

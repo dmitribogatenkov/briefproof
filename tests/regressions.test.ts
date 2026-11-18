@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { RunState } from '../types'
-import { apply, fmtTokens, mdToHtml, newRun, reportPage, ticketIn, verdictOf } from '../hooks/register'
+import { apply, fmtTokens, mdToHtml, newRun, reportPage, summary, ticketIn, verdictOf } from '../hooks/register'
 
 // One test per bug found by the source review before 0.10.0 shipped; each fails without its fix.
 
@@ -272,4 +272,23 @@ test('requirements added from the pane go under the last heading of the brief, o
   await Promise.all([ui.input({ key: 'add-req', text: 'the link expires after a day' }), ui.input({ key: 'add-req', text: 'the owner is told' })])
   expect(w.files.get(brief)).toMatch(/add a cancellation link\n\n## Additions\n\n- the link expires after a day\n\n- the owner is told\n$/)
   expect(w.ledger().requirements.map((r: { id: string }) => r.id)).toEqual(['R01', 'R02', 'R03'])
+})
+
+test('a partly verified requirement is its own status: it needs the checker\'s words, passes G4, and is never counted as delivered', async () => {
+  let s = apply(null, { action: 'init', kind: 'adopt', project: 'p' }).next!
+  s = apply(s, { action: 'add_requirements', quotes: ['every request lands in a Google Sheet', 'clients pick a time'] }).next!
+  s = apply(s, { action: 'set_requirement', id: 'R02', status: 'done', files: ['src/slots.ts'] }).next!
+  // No note, no partial: a partial without the reason is a pass with less effort.
+  expect(() => apply(s, { action: 'set_requirement', id: 'R01', status: 'partial' })).toThrow(/partial needs note/)
+  expect(() => apply(s, { action: 'gate', gate: 'G4', result: 'pass' })).toThrow(/G4 R01 is open/)
+  s = apply(s, { action: 'set_requirement', id: 'R01', status: 'partial', files: ['src/sheet.ts'], note: 'row written to a stubbed adapter; no live Sheet tried' }).next!
+  expect(s.log.at(-1)!.msg).toBe('R01 partly verified: row written to a stubbed adapter; no live Sheet tried')
+  expect(apply(s, { action: 'gate', gate: 'G1', result: 'pass' }).reply).toBe('G1 pass.')
+  s = apply(s, { action: 'gate', gate: 'G4', result: 'pass' }).next!
+  s = apply(s, { action: 'stage', stage: 'done' }).next!
+  expect(summary(s)).toMatch(/partly verified: R01 \(row written to a stubbed adapter; no live Sheet tried\)/)
+  const html = reportPage(s, '')
+  expect(html).toMatch(/<span class="pill partial">partly verified<\/span>/)
+  expect(html).toMatch(/<span class="pill partial">1 partly verified<\/span>/)
+  expect(html).toMatch(/<div class="n">1\/2<\/div><div class="l">requirements verified<\/div>/)
 })

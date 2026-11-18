@@ -50,7 +50,9 @@ Per requirement the checker reported on:
 - `✓` → `set_requirement {id, status: "done", files: [<its FILES>], note: "<evidence>"}`.
   Pass the files even when they did not change; the new list replaces the old one.
   Paths are relative to the project root; the ledger refuses absolute ones.
-- `✗` or `~partial` → `set_requirement {id, status: "broken", note: "<evidence>"}`.
+- `~partial` → `set_requirement {id, status: "partial", files: [<its FILES>], note: "<the checker's words for the part it did not see or could not try>"}`.
+  The pane shows it as "partly verified". Never round it up to `done`.
+- `✗` → `set_requirement {id, status: "broken", note: "<evidence>"}`.
   Do not ask whether to drop it: the user asked for it once, and it held; now it
   does not. The pane shows it as "no longer holds" until a change run fixes it.
 - A **base** requirement (`R02 (base)`) has no id in this run. If it still holds,

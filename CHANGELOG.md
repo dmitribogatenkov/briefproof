@@ -4,6 +4,31 @@ All notable changes to Briefproof. The version is the `version` field in
 `.claude-plugin/plugin.json`; `claude plugin update briefproof@briefproof` picks
 up a new one.
 
+## 0.11.0 · 2026-11-18
+
+A pass means the checker saw all of it.
+
+### Added
+- **Partly verified.** A requirement can now end as `partial`: the checker saw
+  part of it, or could not try it for real (live credentials, a program it does
+  not have). The ledger asks for the checker's own words as the note, the
+  acceptance gate accepts it, and it is never counted as delivered. The pane
+  lists these under **Partly verified**, the status line counts them, and the
+  report page shows the pill and the note.
+- **Failure modes.** `docs/failure-modes/` has one short page per way "done"
+  goes wrong, and the README opens with the problem and one real case.
+
+### Changed
+- **The checker no longer rounds up.** All four checker prompts (build, change,
+  adopt, re-check) now say: `✓` only when it tried the requirement and saw
+  everything its words say; a part not tried or done another way is `~partial`
+  or `✗`, never a `✓` with a caveat. A call that a stub or a dummy value
+  accepted is `~partial`.
+- **What a run does with a partial.** Build and change: a partial that can be
+  fixed gets a fix ticket and one re-check; what is still partial is recorded as
+  `partial`, and what is still `✗` as `broken`. Adopt and re-check record
+  `~partial` as `partial` where they used to record it as broken.
+
 ## 0.10.0 · 2026-11-07
 
 The proof outlives the run: it works on projects you did not build with

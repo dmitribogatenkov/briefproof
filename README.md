@@ -6,6 +6,62 @@ Your AI agent builds exactly what you asked for, and proves it.
 
 https://github.com/user-attachments/assets/89693ac5-fee5-433d-8874-d70fb84f8a7f
 
+## Claude Code says done but a requirement is missing
+
+If you build with Claude Code, you have probably seen this. You ask for
+something specific. Somewhere between your brief and the spec, the agent
+rewrites it into something close but easier, builds that, and says "done".
+Nothing failed and nothing was refused. The requirement that got built just
+isn't the one you wrote, and "done" meant the agent stopped, not that the work
+matches what you asked for.
+
+Briefproof does two things about it. Your requirements are quoted word for word
+and numbered, so there is no rewritten version to drift towards, and nothing
+leaves the list without your own words saying why. And when the build is
+finished, a separate checker that has only seen your original brief (not the
+spec, not the plan, not the tickets) goes through it sentence by sentence.
+
+That checker doesn't only read the code. It installs and runs the project from
+a clean clone and tries each requirement for real, so it catches a requirement
+that was implemented but is broken, not only one that is missing. What it
+cannot exercise, such as anything that needs live credentials, it reads and
+runs the tests for, and reports as partial rather than passing.
+
+### One real case
+
+I gave a plain Claude Code agent, without Briefproof, a long brief for a studio
+booking system in one go, and then ran Briefproof's checker on what it built.
+This is one line from that run, with nothing edited but the cuts marked `[...]`:
+
+```
+The brief, as written:
+  If a client asks, I can delete their personal data: the name, phone and
+  email are removed everywhere including the emails already in the outbox [...]
+
+What the agent said when it finished:
+  The booking system from brief.md is built and working: all 35 automated
+  tests pass [...] every rule in the brief has a test [...]
+
+The checker's line:
+  ~partial [...] client row nulled, their .eml files deleted, desk shows
+  "deleted client", booking and price kept. But `strings studio.db` still
+  printed "Anna Ivanova+37251234567anna…" after deletion (freed database
+  pages are not wiped).
+```
+
+The agent wasn't lying. Most of that line works, and its own tests pass. The
+part that doesn't is the word "everywhere", and it took someone who only had
+the brief, and who went and looked in the file, to notice. The brief, the
+agent's full message and the checker's full reply are in
+[examples/case-3](examples/case-3/). Two smaller briefs I tried first came back
+clean, and they are in [examples](examples/) too.
+
+This failure has a few distinct shapes: a paraphrased requirement, a requirement
+dropped between spec and plan, implemented but broken, done without running it,
+and scope quietly narrowed. Each has a short page in
+[docs/failure-modes](docs/failure-modes/) saying what it looks like and which
+rule or stage catches it.
+
 ## Why I built this
 
 AI agents are good at building things. They are also surprisingly good at
@@ -173,6 +229,9 @@ So now there's a capybara, and it tells you.
   them, names the requirements that may be stale, and offers **Re-check**. A
   requirement that broke stays visible as "no longer holds" until a change run
   fixes it.
+- **It tells you what it could not prove.** A requirement the checker saw only
+  part of, or could not try for real, is listed as "partly verified" with the
+  checker's own words, and is never counted as delivered.
 - **When it's done, it shows you what you got.** One line per stage folder in
   `.briefproof/` with its file count, an **Open folder** button (Finder, Explorer,
   or your desktop's file manager) and **Copy path**. In the terminal the names
@@ -229,7 +288,7 @@ its own folder.
 ```bash
 git clone https://github.com/dmitribogatenkov/briefproof
 claude --plugin-dir ./briefproof          # load it from the folder for one session
-claude plugin test ./briefproof           # 20 tests against an in-memory engine
+claude plugin test ./briefproof           # 42 tests against an in-memory engine
 ```
 
 There is an eval suite under `evals/`: two full builds (the tip calculator and
@@ -264,6 +323,8 @@ hooks/register.tsx               the mod: state tool, live pane, capybaras, mode
 types/index.d.ts                 the run-state contract
 tests/                           claude plugin test .
 docs/                            images for this README
+docs/failure-modes/              one short page per failure mode
+examples/                        three plain-agent runs and the checker's verdicts; case-3 is the README's real case
 ```
 
 ## What a run leaves in your project

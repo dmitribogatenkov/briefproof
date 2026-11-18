@@ -174,12 +174,20 @@ The user resumes from the pane; do not retry on your own.
 `prompts/acceptance.md`, giving it *only* `brief.md` and the clone. It installs,
 runs and checks each sentence of the brief, and names the files each one lives
 in. Save its full reply, unedited, as `{run}/7-acceptance/acceptance.md` (append
-the re-check's reply below it). Every gap becomes a fix ticket; re-check once.
-Then record the evidence, one call per requirement:
-`set_requirement {id, status: "done", files: [<its FILES line>], note: "<its evidence, one line>"}`.
+the re-check's reply below it). Every `✗` becomes a fix ticket, and so does a
+`~partial` where part of the requirement is missing or behaves differently from
+the brief's words; re-check once. A `~partial` whose only gap is something the
+checker could not try for real (live credentials, a program it does not have)
+needs no ticket: there is nothing to fix. Then record the last verdict, one call
+per requirement:
+- `✓` → `set_requirement {id, status: "done", files: [<its FILES line>], note: "<its evidence, one line>"}`
+- `~partial` → `set_requirement {id, status: "partial", files: [<its FILES line>], note: "<the checker's words for the part it did not see or could not try>"}`
+- still `✗` after the re-check → `set_requirement {id, status: "broken", note: "<its evidence>"}`
+
 Those files are what Briefproof watches afterwards: when one changes, the pane
 names the requirements that may be stale and offers a re-check. Never mark a
-requirement `done` without the checker's `✓`. `gate G4`.
+requirement `done` without the checker's `✓`, and never turn a `~partial` into
+`done` yourself. `gate G4`.
 
 ### 8 · Report
 `stage done` first, so the report and project memory are written on the Done
@@ -187,6 +195,8 @@ model; the mod rewrites the report page when this turn ends.
 Compose from files re-read from disk, not from memory. In plain language:
 what was built and how to run it; requirement table (R##, quote, status);
 *Assumptions* (in auto mode); env var names still empty; anything deferred;
+every `partial` or `broken` requirement near the top, with the checker's words,
+so nobody reads the run as fully verified;
 the usage-by-stage table from `show`.
 Write the report to `{run}/8-report/report.md` first, then post the same
 text in the chat. In auto mode also write `{run}/3-briefing/decisions.md`:

@@ -24,6 +24,18 @@ change any file.
    implements it and, if there is one, the test that covers it. One to five
    files, relative to the project root, never dependencies or build output.
 
+If you cannot try a requirement for real because it needs something you don't
+have (live credentials, a paid account, a real inbox), read the code that
+implements it, run its tests, and mark it `~partial`, saying what you could not
+try. A call that a stub or a dummy value accepted shows the code path, not the
+real service: that is `~partial`, never `✓`.
+
+Give `✓` only when you tried the requirement and saw everything its words say.
+If any part was not tried, behaved differently from the words, or was done
+another way than the words say, the verdict is `~partial` or `✗`, with that
+part named. Read literally: if the brief says "notify the owner" and the project
+only logs, that is not a `✓`. Never put a caveat on a `✓`.
+
 Reply:
 - `RUNS:` yes/no, and the exact command that failed if no.
 - `REQUIREMENTS:` one line per bullet, in order: `✓` / `✗` / `~partial`, the

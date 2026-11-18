@@ -318,3 +318,31 @@ test('a change run keeps watching the base run: its evidence is in the proof, an
   // Snapshot works on a change run even when only the base names files.
   expect((await call({ action: 'snapshot' })).result).toMatch(/Proof refreshed: 3 files across 3 requirements \(this run and its base\)/)
 })
+
+test('a finished run with a partly verified requirement says so in the pane and the status line', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on)
+  w.files.set('/p/src/picker.ts', 'v1')
+  w.files.set('/p/src/sheet.ts', 'v1')
+  w.files.set('/p/.briefproof/current', 'runs/20261101-0941-massage-booking\n')
+  const dir = '/p/.briefproof/runs/20261101-0941-massage-booking'
+  w.files.set(`${dir}/state.json`, JSON.stringify({
+    dir: '.briefproof/runs/20261101-0941-massage-booking', kind: 'build',
+    project: 'Massage booking', mode: 'ask', stage: 'done',
+    stages: ['preflight', 'manifest', 'briefing', 'spec', 'plan', 'build', 'accept', 'done'].map(id => ({ id, label: id })),
+    startedAt: 0, updatedAt: 1,
+    requirements: [
+      { id: 'R01', quote: 'clients pick a service and a time', status: 'done', files: ['src/picker.ts'] },
+      { id: 'R02', quote: 'every request lands in a Google Sheet', status: 'partial', files: ['src/sheet.ts'], note: 'row written to a stubbed adapter; no live Sheet tried' },
+    ],
+    tickets: [{ id: 'T01', title: 'Booking form', reqs: ['R01', 'R02'], review: false, status: 'done' }],
+    gates: { G1: 'pass', G2: 'pass', G3: 'pass', G4: 'pass' }, log: [],
+    proof: { at: 1, files: { 'src/picker.ts': hash('v1'), 'src/sheet.ts': hash('v1') } },
+  }))
+  await $.session.start({ cwd: '/p', surface: 'desktop', isInteractive: true })
+  await clock.advance(2100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /Partly verified/ })).toBeDefined()
+  expect(await ui.find({ text: /no live Sheet tried/ })).toBeDefined()
+  expect(w.statuses.at(-1)).toBe('briefproof · Done · 1/1 tickets · 1 partly verified')
+})
