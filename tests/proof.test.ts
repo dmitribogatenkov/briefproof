@@ -346,3 +346,31 @@ test('a finished run with a partly verified requirement says so in the pane and 
   expect(await ui.find({ text: /no live Sheet tried/ })).toBeDefined()
   expect(w.statuses.at(-1)).toBe('briefproof · Done · 1/1 tickets · 1 partly verified')
 })
+
+test('a finished check shows what the brief asks for and the project does not do', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on)
+  w.files.set('/p/src/picker.ts', 'v1')
+  w.files.set('/p/.briefproof/current', 'runs/20261119-1000-studio-booking\n')
+  const dir = '/p/.briefproof/runs/20261119-1000-studio-booking'
+  w.files.set(`${dir}/state.json`, JSON.stringify({
+    dir: '.briefproof/runs/20261119-1000-studio-booking', kind: 'check',
+    project: 'Studio booking', mode: 'ask', stage: 'done',
+    stages: ['preflight', 'manifest', 'accept', 'done'].map(id => ({ id, label: id })),
+    startedAt: 0, updatedAt: 1,
+    requirements: [
+      { id: 'R01', quote: 'clients pick a service and a time', status: 'done', files: ['src/picker.ts'] },
+      { id: 'R02', quote: 'a client can cancel by a link', status: 'broken', note: 'GET /cancel/abc returned 404' },
+    ],
+    tickets: [], gates: { G4: 'pass' }, log: [],
+    proof: { at: 1, files: { 'src/picker.ts': hash('v1') } },
+  }))
+  await $.session.start({ cwd: '/p', surface: 'desktop', isInteractive: true })
+  await clock.advance(2100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ text: /1 requirement not met/ })).toBeDefined()
+  expect(await ui.find({ text: /^Not met/ })).toBeDefined()
+  expect(await ui.find({ text: /GET \/cancel\/abc returned 404/ })).toBeDefined()
+  expect(await ui.find({ text: /No longer holds/ })).toBeUndefined()
+  expect(w.statuses.at(-1)).toBe('briefproof · Done · 1 not met')
+})

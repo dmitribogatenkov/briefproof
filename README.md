@@ -90,8 +90,15 @@ In a Claude Code terminal session:
 /plugin install briefproof --marketplace dmitribogatenkov/briefproof
 ```
 
-Answer `y` to add the marketplace and press Enter for the user scope. That's
-it. There is nothing else to install: no Python, no Node, no config. Everything
+Answer `y` to add the marketplace and press Enter for the user scope.
+
+Or from a plain terminal, with no session open:
+
+```bash
+claude plugin install briefproof --marketplace dmitribogatenkov/briefproof
+```
+
+That's it. There is nothing else to install: no Python, no Node, no config. Everything
 runs inside Claude Code, and the plugin works in every project from then on.
 You need a Claude Code version with mods (October 2026 or later).
 
@@ -143,6 +150,23 @@ the files it lives in. Nothing in the project changes. From then on
 `/briefproof:change` works on it like on anything Briefproof built, and a README
 promise that nothing in the code backs is marked "no longer holds" rather than
 quietly passed.
+
+### Checking a project against a brief
+
+```
+/briefproof:check brief.md
+```
+
+Sometimes the project is already built, by you, by another agent or with
+another tool, and all you want to know is whether it does what was asked. Check
+takes the brief (a file, a ticket pasted in, or a few sentences), quotes it into
+numbered requirements, and sends a checker that has only seen the brief to try
+each line in a clean copy. Every line comes back as holds, partly verified or
+not met, with the command it ran and what it saw.
+
+It asks no questions, builds nothing and changes no source file. When it is
+done you have a finished run like any other: `/briefproof:change` can fix what
+was not met, and the pane tells you when the proof goes stale.
 
 ### When the proof goes stale
 
@@ -288,7 +312,7 @@ its own folder.
 ```bash
 git clone https://github.com/dmitribogatenkov/briefproof
 claude --plugin-dir ./briefproof          # load it from the folder for one session
-claude plugin test ./briefproof           # 42 tests against an in-memory engine
+claude plugin test ./briefproof           # 44 tests against an in-memory engine
 ```
 
 There is an eval suite under `evals/`: two full builds (the tip calculator and
@@ -317,6 +341,7 @@ run, I'd rather use that.
 skills/build/SKILL.md            the orchestrator (/briefproof:build)
 skills/build/prompts/            executor + reviewer, coverage (G2), acceptance (G4)
 skills/change/                   change requests on a finished run (/briefproof:change)
+skills/check/                    an existing project held against a brief (/briefproof:check)
 evals/                           claude plugin eval cases
 .github/workflows/check.yml      validate + tests on every push
 hooks/register.tsx               the mod: state tool, live pane, capybaras, model routing

@@ -43,7 +43,17 @@ const TICKET_STATUS = ['todo', 'running', 'review', 'done', 'failed']
 const GATES = ['G1', 'G2', 'G3', 'G4']
 const ADOPT_GATES = ['G1', 'G4']
 const GATE_RESULTS = ['pass', 'fail', 'pending']
-const KINDS = ['build', 'change', 'adopt']
+const KINDS = ['build', 'change', 'adopt', 'check']
+/** A checked project is held against a brief it was given: quoted, then verified. Nothing is asked, specified, planned or built. */
+const CHECK_STAGES = ['preflight', 'manifest', 'accept', 'done'] as const
+const CHECK_GATES = ['G4']
+const stagesFor = (kind?: string): readonly string[] => (kind === 'adopt' ? ADOPT_STAGES : kind === 'check' ? CHECK_STAGES : STAGES)
+const gatesFor = (kind?: string): string[] => (kind === 'adopt' ? ADOPT_GATES : kind === 'check' ? CHECK_GATES : GATES)
+/** Runs that verify a project as it is: no tickets, nothing built. */
+const verifies = (s: { kind?: string }): boolean => s.kind === 'adopt' || s.kind === 'check'
+/** How a requirement the checker did not find reads. A checked project never showed it; any other run had it once. */
+const unmet = (s: { kind?: string }): string => (s.kind === 'check' ? 'not met' : 'no longer holds')
+const unmetCount = (s: { kind?: string }, n: number): string => (s.kind === 'check' ? `${n} not met` : `${n} no longer hold${n === 1 ? 's' : ''}`)
 const ACTIONS = [
   'init', 'stage', 'mode', 'add_requirements', 'set_requirement', 'add_tickets',
   'set_ticket', 'gate', 'log', 'check', 'show', 'budget', 'recheck', 'snapshot',
@@ -52,7 +62,7 @@ const ACTIONS = [
 const DESCRIPTION = [
   'The Briefproof run ledger: the ONLY way to create or change the run state (state.json in the run folder)',
   '(never edit that file by hand). Drives the live progress pane the user watches.',
-  'Actions: init {project, mode?} · init {kind: "change", request, mode?} on a finished run · init {kind: "adopt", project, mode?} for an existing project ·',
+  'Actions: init {project, mode?} · init {kind: "change", request, mode?} on a finished run · init {kind: "adopt", project, mode?} for an existing project · init {kind: "check", project, mode?} to hold an existing project against a brief ·',
   'stage {stage} · mode {mode} · add_requirements {quotes: verbatim strings} → R01… ·',
   'set_requirement {id, status, reason?, files?, note?} (files: the project files where it lives, from the acceptance check; note: the evidence in one line) ·',
   'add_tickets {tickets: [{title, reqs, review?}]} → T01… · set_ticket {id, status} ·',
@@ -69,7 +79,7 @@ const INPUT_SCHEMA = {
     action: { type: 'string', enum: ACTIONS },
     project: { type: 'string' },
     mode: { type: 'string', enum: ['ask', 'auto'] },
-    kind: { type: 'string', enum: KINDS, description: 'init only: change = a change request on the finished run in this folder; adopt = describe and verify a project that already exists, as a finished run' },
+    kind: { type: 'string', enum: KINDS, description: 'init only: change = a change request on the finished run in this folder; adopt = describe and verify a project that already exists, as a finished run; check = verify an existing project against a brief the user gives, nothing built' },
     request: { type: 'string', description: 'init with kind change: the change request, verbatim' },
     stage: { type: 'string', enum: [...STAGES] },
     quotes: { type: 'array', items: { type: 'string' } },
@@ -125,7 +135,8 @@ export function problems(s: RunState, gate?: string): string[] {
   const out: string[] = []
   const ids = new Set(s.requirements.map(r => r.id))
   for (const r of s.requirements) {
-    if (r.status === 'open' && !r.reason) out.push(`G1 ${r.id} still open with no reason`)
+    // A check asks nothing, so it has no G1: a line stays open until the checker's verdict, and G4 is what refuses it.
+    if (r.status === 'open' && !r.reason && gatesOf(s).includes('G1')) out.push(`G1 ${r.id} still open with no reason`)
     if (r.status === 'dropped' && !r.reason) out.push(`G1 ${r.id} dropped without the user's quote`)
   }
   const covered = new Set(s.tickets.flatMap(t => t.reqs))
@@ -153,7 +164,7 @@ export function problems(s: RunState, gate?: string): string[] {
 }
 
 /** The gates a run of this kind has: an adopted project is never specified or planned, so it has no G2 or G3. */
-const gatesOf = (s: RunState): string[] => (s.kind === 'adopt' ? ADOPT_GATES : GATES)
+const gatesOf = (s: RunState): string[] => gatesFor(s.kind)
 
 export function summary(s: RunState, st: Stats | null = null, d: Drift | null = null): string {
   const done = s.tickets.filter(t => t.status === 'done').length
@@ -162,8 +173,9 @@ export function summary(s: RunState, st: Stats | null = null, d: Drift | null = 
     `run folder: ${s.dir ?? ROOT} (write every file of this run under it)`,
     ...(s.kind === 'change' ? [`change request on ${s.base}: "${s.request}"`] : []),
     ...(s.kind === 'adopt' ? ['adopted project: the brief describes what it does today; no spec, plan or build stages'] : []),
+    ...(s.kind === 'check' ? ['check: the project as it is, held against the brief the user gave; no questions, spec, plan or build stages, and no source file changes'] : []),
     `gates: ${Object.keys(s.gates).map(g => `${g} ${s.gates[g] ?? 'pending'}`).join('  ')}`,
-    ...(s.kind === 'adopt' ? [] : [`tickets ${done}/${s.tickets.length}`]),
+    ...(verifies(s) ? [] : [`tickets ${done}/${s.tickets.length}`]),
     ...s.tickets.map(t => `  ${t.id} [${t.status}] ${t.title} (${t.reqs.join(', ')})`),
     'requirements:',
     ...s.requirements.map(r => `  ${r.id} [${r.status}] ${r.quote}${r.reason ? ` (user: "${r.reason}")` : ''}${r.files?.length ? ` · in ${r.files.join(', ')}` : ''}`),
@@ -171,7 +183,7 @@ export function summary(s: RunState, st: Stats | null = null, d: Drift | null = 
   if (s.stage === 'done') {
     if (s.rechecking) lines.push('re-check in progress: finish it with set_requirement per requirement, then snapshot')
     const broken = s.requirements.filter(r => r.status === 'broken')
-    if (broken.length) lines.push(`no longer holds: ${broken.map(r => r.id).join(', ')}. Offer /briefproof:change to fix it.`)
+    if (broken.length) lines.push(`${unmet(s)}: ${broken.map(r => r.id).join(', ')}. Offer /briefproof:change to fix it.`)
     const partial = s.requirements.filter(r => r.status === 'partial')
     if (partial.length) lines.push(`partly verified: ${partial.map(r => `${r.id} (${r.note})`).join('; ')}. Say so in the report; never call these done.`)
     if (d && d.changed.length) lines.push(`drift: ${d.changed.length} evidence file${d.changed.length > 1 ? 's' : ''} changed since the last check (${d.changed.slice(0, 6).join(', ')}${d.changed.length > 6 ? ', …' : ''}); ${d.reqs.join(', ')} may be stale. /briefproof:recheck verifies them again.`)
@@ -199,10 +211,10 @@ export function summary(s: RunState, st: Stats | null = null, d: Drift | null = 
   return lines.join('\n')
 }
 
-export function newRun(project: string, mode: string, opts: { kind?: 'build' | 'change' | 'adopt'; base?: string; request?: string } = {}): RunState {
+export function newRun(project: string, mode: string, opts: { kind?: 'build' | 'change' | 'adopt' | 'check'; base?: string; request?: string } = {}): RunState {
   const now = Date.now()
   const kind = opts.kind ?? 'build'
-  const stages = kind === 'adopt' ? ADOPT_STAGES : STAGES
+  const stages = stagesFor(kind)
   const s: RunState = {
     project, mode, stage: 'preflight',
     kind,
@@ -210,11 +222,11 @@ export function newRun(project: string, mode: string, opts: { kind?: 'build' | '
     stages: stages.map(id => ({ id, label: LABELS[id] ?? id })),
     startedAt: now, updatedAt: now,
     requirements: [], tickets: [],
-    gates: Object.fromEntries((kind === 'adopt' ? ADOPT_GATES : GATES).map(g => [g, 'pending'])),
+    gates: Object.fromEntries(gatesFor(kind).map(g => [g, 'pending'])),
     log: [],
     timeline: { preflight: { startedAt: now } },
   }
-  addLog(s, kind === 'change' ? `Change request started · ${mode} mode` : kind === 'adopt' ? `Adopting the project · ${mode} mode` : `Run started · ${mode} mode`)
+  addLog(s, kind === 'change' ? `Change request started · ${mode} mode` : kind === 'adopt' ? `Adopting the project · ${mode} mode` : kind === 'check' ? `Checking the project against a brief · ${mode} mode` : `Run started · ${mode} mode`)
   return s
 }
 
@@ -243,6 +255,10 @@ export function apply(prev: RunState | null, e: Record<string, unknown>, live: L
       const s = newRun(str(e.project) ?? refuse('init needs project: the name of the project being adopted'), mode, { kind: 'adopt' })
       return { next: s, reply: `Adopting "${s.project}" in ${mode} mode: five stages (Preflight, Manifest, Briefing, Acceptance, Done), no tickets. Describe what the project does today in 1-brief/brief.md, quote it into requirements, confirm with the user, then have a blind checker verify each line in the code and record its files with set_requirement.`, events }
     }
+    if (kind === 'check') {
+      const s = newRun(str(e.project) ?? refuse('init needs project: the name of the project being checked'), mode, { kind: 'check' })
+      return { next: s, reply: `Checking "${s.project}" against a brief in ${mode} mode: four stages (Preflight, Manifest, Acceptance, Done), no questions, no tickets, no source file changes. Copy the brief word for word into 1-brief/brief.md, quote it into requirements, then have a blind checker try each line in a clean copy and record the verdicts with set_requirement.`, events }
+    }
     const s = newRun(str(e.project) ?? refuse('init needs project'), mode)
     return { next: s, reply: `Run "${s.project}" started in ${mode} mode.`, events }
   }
@@ -264,7 +280,7 @@ export function apply(prev: RunState | null, e: Record<string, unknown>, live: L
     case 'stage': {
       const stage = str(e.stage) ?? refuse('stage is required')
       const allowed = s.stages.map(x => x.id)
-      if (!allowed.includes(stage)) refuse(`stage is one of ${allowed.join(', ')}${s.kind === 'adopt' ? ' (an adopted project has no spec, plan or build stage)' : ''}`)
+      if (!allowed.includes(stage)) refuse(`stage is one of ${allowed.join(', ')}${s.kind === 'adopt' ? ' (an adopted project has no spec, plan or build stage)' : s.kind === 'check' ? ' (a check has no briefing, spec, plan or build stage)' : ''}`)
       const now = Date.now()
       s.timeline = { ...(s.timeline ?? {}) }
       if (stage !== s.stage) {
@@ -328,13 +344,14 @@ export function apply(prev: RunState | null, e: Record<string, unknown>, live: L
       if (files.length) r.files = [...new Set(files)]
       if (note) r.note = note
       if (status === 'deferred' || status === 'dropped') addLog(s, `${r.id} ${status}`)
-      if (status === 'broken' && was !== 'broken') addLog(s, `${r.id} no longer holds${note ? `: ${note}` : ''}`)
+      if (status === 'broken' && was !== 'broken') addLog(s, `${r.id} ${unmet(s)}${note ? `: ${note}` : ''}`)
       if (status === 'done' && was === 'broken') addLog(s, `${r.id} holds again`)
       if (status === 'partial' && was !== 'partial') addLog(s, `${r.id} partly verified: ${note ?? r.note}`)
       reply = `${r.id} is ${status}.${files.length ? ` Watching ${files.length} file${files.length > 1 ? 's' : ''} for it.` : ''}`
       break
     }
     case 'add_tickets': {
+      if (s.kind === 'check') refuse('a check has no tickets: it verifies the project as it is and builds nothing. To fix what it found, finish the check and run /briefproof:change.')
       if (s.kind === 'adopt') refuse('an adopted project has no tickets: it is described and verified, not built. To change it, finish the adoption and run /briefproof:change.')
       const list = Array.isArray(e.tickets) ? e.tickets : []
       if (list.length === 0) refuse('add_tickets needs tickets: [{title, reqs, review?}]')
@@ -379,7 +396,7 @@ export function apply(prev: RunState | null, e: Record<string, unknown>, live: L
     }
     case 'gate': {
       const gate = str(e.gate)?.toUpperCase() ?? refuse('gate is required')
-      if (!gatesOf(s).includes(gate)) refuse(`gate is one of ${gatesOf(s).join(', ')}${s.kind === 'adopt' ? ' (an adopted project has no spec or plan, so no G2 or G3)' : ''}`)
+      if (!gatesOf(s).includes(gate)) refuse(`gate is one of ${gatesOf(s).join(', ')}${s.kind === 'adopt' ? ' (an adopted project has no spec or plan, so no G2 or G3)' : s.kind === 'check' ? ' (a check has only the blind acceptance gate)' : ''}`)
       const result = str(e.result) ?? refuse('result is required')
       if (!GATE_RESULTS.includes(result)) refuse('result is pass, fail or pending')
       if (result === 'pass') {
@@ -645,7 +662,7 @@ function statusLine(s: RunState, d: Drift | null = null): string {
   if (s.stage === 'done') {
     if (s.rechecking) return `${base} · re-checking`
     const broken = s.requirements.filter(r => r.status === 'broken').length
-    if (broken) return `${base} · ${broken} no longer hold${broken === 1 ? 's' : ''}`
+    if (broken) return `${base} · ${unmetCount(s, broken)}`
     const partial = s.requirements.filter(r => r.status === 'partial').length
     if (partial && !d?.reqs.length) return `${base} · ${partial} partly verified`
     if (d?.reqs.length) return `${base} · ${d.reqs.length} may be stale`
@@ -944,7 +961,7 @@ async function setRunBudget($: EngineInterface, text: string) {
 async function resumeRun($: EngineInterface) {
   await update($, fresh, () => false)
   const s = await read($, run)
-  await $.command.run({ command: s?.kind === 'change' ? 'briefproof:change' : s?.kind === 'adopt' ? 'briefproof:adopt' : 'briefproof:build' })
+  await $.command.run({ command: s?.kind === 'change' ? 'briefproof:change' : s?.kind === 'adopt' ? 'briefproof:adopt' : s?.kind === 'check' ? 'briefproof:check' : 'briefproof:build' })
 }
 
 /** The Re-check button: a blind checker verifies the requirements whose files changed, then the proof is retaken. */
@@ -1184,6 +1201,11 @@ const QUIPS: Record<string, string[]> = {
   'adopt:briefing': ['Your project, your words. Fix anything that reads wrong.', 'Drop what it doesn’t do, add what it does. The pane takes both.'],
   'adopt:accept': ['A stranger checks each sentence against the code and writes down where it lives.', 'Verified means found and run, not read about.'],
   'adopt:done': ['Adopted. From here, /briefproof:change keeps the proof going.', 'A brief, a numbered list, and the files behind each line. The project has a past now.'],
+  'check:preflight': ['Reading your brief, then the project. In that order.', 'Your words go in the folder exactly as you gave them.'],
+  'check:manifest': ['One numbered line per thing you asked for. Nothing rephrased.', 'Copying, not summarising. The checker gets your words, not mine.'],
+  'check:accept': ['A stranger has your brief and a clean copy. It tries each line for real.', 'Nobody who built this is in the room.'],
+  'check:done': ['Checked. Every line has a verdict and the evidence behind it.', 'What holds, what holds in part, what is not there. No rounding up.'],
+  unmet: ['The brief asks for it and the checker did not find it. /briefproof:change builds it.', 'Not met is not a judgment. It is a line with evidence.'],
   stale: ['Something under a verified requirement changed. Not broken, not proven either.', 'Re-check takes minutes; the blind checker looks only at what moved.'],
   broken: ['A requirement that held no longer does. /briefproof:change puts it back.', 'The proof is honest about this one: it broke.'],
 }
@@ -1337,7 +1359,7 @@ export function reportPage(s: RunState, reportMarkdown: string): string {
   const requests = Object.values(usage).reduce((n, c) => n + c.requests, 0)
   const started = new Date(s.startedAt)
   const ended = s.timeline?.done?.endedAt ?? s.updatedAt
-  const reqRows = s.requirements.map(r => `<tr><td class="id">${r.id}</td><td>${esc(r.quote)}${r.note ? `<div class="why">${esc(r.note)}</div>` : ''}${r.files?.length ? `<div class="why"><code>${r.files.map(esc).join('</code> <code>')}</code></div>` : ''}</td><td><span class="pill ${esc(r.status)}">${esc(r.status === 'broken' ? 'no longer holds' : r.status === 'partial' ? 'partly verified' : r.status)}</span>${r.reason ? `<div class="why">you: “${esc(r.reason)}”</div>` : ''}</td></tr>`).join('')
+  const reqRows = s.requirements.map(r => `<tr><td class="id">${r.id}</td><td>${esc(r.quote)}${r.note ? `<div class="why">${esc(r.note)}</div>` : ''}${r.files?.length ? `<div class="why"><code>${r.files.map(esc).join('</code> <code>')}</code></div>` : ''}</td><td><span class="pill ${esc(r.status)}">${esc(r.status === 'broken' ? unmet(s) : r.status === 'partial' ? 'partly verified' : r.status)}</span>${r.reason ? `<div class="why">you: “${esc(r.reason)}”</div>` : ''}</td></tr>`).join('')
   const broken = s.requirements.filter(r => r.status === 'broken').length
   const partial = s.requirements.filter(r => r.status === 'partial').length
   const watched = evidenceFiles(s).length
@@ -1367,20 +1389,20 @@ export function reportPage(s: RunState, reportMarkdown: string): string {
   @media print { body { background:#fff } .report, .tile, .chart { border-color:#ddd } }
 </style></head><body><main>
 <h1>${esc(s.project)}</h1>
-<div class="meta">${s.kind === 'change' ? `Change request: <b>“${esc(s.request ?? '')}”</b> · base run <code>${esc(s.base ?? '')}</code><br>` : s.kind === 'adopt' ? 'Adopted project: what it does today, each line verified in the code<br>' : ''}Briefproof report · ${esc(s.mode)} mode · started ${started.toISOString().slice(0, 16).replace('T', ' ')} · took ${fmtMinutes(ended - s.startedAt)}</div>
+<div class="meta">${s.kind === 'change' ? `Change request: <b>“${esc(s.request ?? '')}”</b> · base run <code>${esc(s.base ?? '')}</code><br>` : s.kind === 'adopt' ? 'Adopted project: what it does today, each line verified in the code<br>' : s.kind === 'check' ? 'Check: the project as it is, held against the brief it was given<br>' : ''}Briefproof report · ${esc(s.mode)} mode · started ${started.toISOString().slice(0, 16).replace('T', ' ')} · took ${fmtMinutes(ended - s.startedAt)}</div>
 <div class="tiles">
-  <div class="tile"><div class="n">${delivered}/${live.length}</div><div class="l">requirements ${s.kind === 'adopt' ? 'verified' : 'delivered'}</div></div>
-  ${s.kind === 'adopt' ? `<div class="tile"><div class="n">${watched}</div><div class="l">files watched</div></div>` : `<div class="tile"><div class="n">${s.tickets.filter(t => t.status === 'done').length}/${s.tickets.length}</div><div class="l">tickets done</div></div>`}
+  <div class="tile"><div class="n">${delivered}/${live.length}</div><div class="l">requirements ${verifies(s) ? 'verified' : 'delivered'}</div></div>
+  ${verifies(s) ? `<div class="tile"><div class="n">${watched}</div><div class="l">files watched</div></div>` : `<div class="tile"><div class="n">${s.tickets.filter(t => t.status === 'done').length}/${s.tickets.length}</div><div class="l">tickets done</div></div>`}
   <div class="tile"><div class="n">${fmtTokens(total)}</div><div class="l">tokens in ${requests} requests</div></div>
   <div class="tile"><div class="n">${fmtMinutes(ended - s.startedAt)}</div><div class="l">wall clock</div></div>
 </div>
-<p>${gates}${broken ? ` <span class="pill broken">${broken} no longer hold${broken === 1 ? 's' : ''}</span>` : ''}${partial ? ` <span class="pill partial">${partial} partly verified</span>` : ''}</p>
+<p>${gates}${broken ? ` <span class="pill broken">${unmetCount(s, broken)}</span>` : ''}${partial ? ` <span class="pill partial">${partial} partly verified</span>` : ''}</p>
 <h2>Report</h2>
 <div class="report">${reportMarkdown.trim() ? mdToHtml(reportMarkdown) : '<p class="muted">The agent has not written 8-report/report.md yet.</p>'}</div>
 <h2>Requirements</h2>
 <p class="muted">Quoted from the brief, never paraphrased. Anything set aside carries the reason in the user's own words.${watched ? ' Under each quote: the checker\u2019s evidence and the files it lives in.' : ''}</p>
 <table><thead><tr><th>#</th><th>Quote</th><th>Status</th></tr></thead><tbody>${reqRows}</tbody></table>
-${s.kind === 'adopt' ? '' : `<h2>Tickets</h2>
+${verifies(s) ? '' : `<h2>Tickets</h2>
 <table><thead><tr><th>#</th><th>Ticket</th><th>Serves</th><th>Status</th></tr></thead><tbody>${ticketRows}</tbody></table>`}
 ${rows.length ? `<h2>Where the tokens went</h2><p class="muted">${fmtTokens(total)} tokens in ${requests} requests; share, tokens, model, minutes per stage.</p><div class="chart">${chart}</div>` : ''}
 <footer>Made by Briefproof, a Claude Code plugin. Run folder: <code>${esc(s.dir ?? ROOT)}</code>. Every file this page summarises is in that folder.${s.proof ? ` Evidence last checked ${new Date(s.proof.at).toISOString().slice(0, 16).replace('T', ' ')} across ${Object.keys(s.proof.files).length} file${Object.keys(s.proof.files).length === 1 ? '' : 's'}.` : ''}</footer>
@@ -1652,7 +1674,8 @@ export const register: Register = (on, options) => {
           <Text bold>Briefproof</Text>
           <Text dimColor>No run in this folder yet.</Text>
           <Text dimColor>Start one with /briefproof:build &lt;what to build&gt;,</Text>
-          <Text dimColor>or /briefproof:adopt in a project that already exists.</Text>
+          <Text dimColor>/briefproof:adopt in a project that already exists,</Text>
+          <Text dimColor>or /briefproof:check &lt;brief&gt; to hold one against a brief.</Text>
         </Box>
       )
     }
@@ -1678,6 +1701,7 @@ export const register: Register = (on, options) => {
     const seed = s.log.length
     const working = lanes.length > 0 && s.stage === 'build'
     const adopt = s.kind === 'adopt'
+    const check = s.kind === 'check'
     const broken = s.requirements.filter(r => r.status === 'broken')
     const partly = s.requirements.filter(r => r.status === 'partial')
     const stale = s.stage === 'done' ? await read($, drift) : null
@@ -1689,14 +1713,15 @@ export const register: Register = (on, options) => {
       : s.stage === 'build' ? 'between'
       : s.stage
     const adoptTitles: Record<string, string> = { preflight: 'Reading the project', manifest: 'Writing down what it does', briefing: 'Checking it with you', accept: 'Verifying each line in the code' }
+    const checkTitles: Record<string, string> = { preflight: 'Reading your brief', manifest: 'Copying your words', accept: 'Trying each line for real' }
     const buildTitles: Record<string, string> = { preflight: 'Reading the brief', manifest: 'Copying your words', briefing: 'Working out what to ask', spec: 'Writing the spec', plan: 'Cutting tickets', accept: 'Blind check in progress' }
     const title =
-      moment === 'done' ? (s.rechecking ? 'Re-check in progress' : broken.length ? `${broken.length} requirement${broken.length > 1 ? 's' : ''} no longer hold${broken.length === 1 ? 's' : ''}` : stale ? `${stale.reqs.length} may be stale` : adopt ? `Adopted · ${delivered}/${live.length} requirements verified` : `All done · ${delivered}/${live.length} requirements delivered`)
+      moment === 'done' ? (s.rechecking ? 'Re-check in progress' : broken.length ? (check ? `${broken.length} requirement${broken.length > 1 ? 's' : ''} not met` : `${broken.length} requirement${broken.length > 1 ? 's' : ''} no longer hold${broken.length === 1 ? 's' : ''}`) : stale ? `${stale.reqs.length} may be stale` : adopt ? `Adopted · ${delivered}/${live.length} requirements verified` : check ? `Checked · ${delivered}/${live.length} requirements verified` : `All done · ${delivered}/${live.length} requirements delivered`)
       : moment === 'waiting' ? 'Waiting for you'
       : moment === 'paused' ? 'Paused'
       : moment === 'build' ? `${lanes.length} at work`
       : moment === 'between' ? 'Between tickets'
-      : (adopt ? adoptTitles : buildTitles)[moment] ?? LABELS[s.stage] ?? s.stage
+      : (adopt ? adoptTitles : check ? checkTitles : buildTitles)[moment] ?? LABELS[s.stage] ?? s.stage
     const detail =
       moment === 'waiting' ? `${s.pending!.questions.length} question${s.pending!.questions.length > 1 ? 's' : ''} in the dialog`
       : moment === 'build' ? lanes.map(t => `${t.title}${t.status === 'review' ? ' (review)' : ''}`).join(' · ')
@@ -1704,7 +1729,7 @@ export const register: Register = (on, options) => {
       : moment === 'done' && broken.length ? broken.map(r => r.id).join(', ')
       : moment === 'done' && stale ? `${stale.reqs.join(', ')} · ${stale.changed.length} file${stale.changed.length > 1 ? 's' : ''} changed since the last check`
       : null
-    const quipKey = moment === 'done' && s.rechecking ? 'accept' : moment === 'done' && broken.length ? 'broken' : moment === 'done' && stale ? 'stale' : adopt && QUIPS[`adopt:${moment}`] ? `adopt:${moment}` : moment
+    const quipKey = moment === 'done' && s.rechecking ? 'accept' : moment === 'done' && broken.length ? (check ? 'unmet' : 'broken') : moment === 'done' && stale ? 'stale' : adopt && QUIPS[`adopt:${moment}`] ? `adopt:${moment}` : check && QUIPS[`check:${moment}`] ? `check:${moment}` : moment
     const caption = (
       <Box flexDirection="column" flexGrow={1} flexShrink={1}>
         <Text bold color={moment === 'done' ? (s.rechecking ? 'claude' : broken.length ? 'error' : stale ? 'warning' : 'success') : moment === 'build' ? 'claude' : undefined} wrap="truncate-end">{title}</Text>
@@ -1801,7 +1826,7 @@ export const register: Register = (on, options) => {
             {s.project}
             {s.paused && <Text color="warning">  · paused</Text>}
           </Text>
-          <Text dimColor>{s.kind === 'change' ? 'change request · ' : adopt ? 'adopted project · ' : ''}{s.mode === 'auto' ? 'auto' : 'ask'} mode · started {clock(s.startedAt)}</Text>
+          <Text dimColor>{s.kind === 'change' ? 'change request · ' : adopt ? 'adopted project · ' : check ? 'check against a brief · ' : ''}{s.mode === 'auto' ? 'auto' : 'ask'} mode · started {clock(s.startedAt)}</Text>
           {s.kind === 'change' && s.request && <Text dimColor wrap="wrap">“{s.request}”</Text>}
         </Box>
 
@@ -1812,7 +1837,7 @@ export const register: Register = (on, options) => {
               <Text dimColor>  at {LABELS[s.stage] ?? s.stage}{tickets.length ? ` · ${done} of ${tickets.length} tickets done` : ''}</Text>
             </Text>
             <Box>
-              <Button key="resume-run" variant="primary" hotkey="r" label={adopt ? 'Resume the adoption' : 'Resume the run'} onPress={() => resumeRun($)} />
+              <Button key="resume-run" variant="primary" hotkey="r" label={adopt ? 'Resume the adoption' : check ? 'Resume the check' : 'Resume the run'} onPress={() => resumeRun($)} />
             </Box>
           </Box>
         )}
@@ -1822,7 +1847,7 @@ export const register: Register = (on, options) => {
             {broken.length > 0 && (
               <Box flexDirection="column">
                 <Text>
-                  <Text bold color="error">No longer holds</Text>
+                  <Text bold color="error">{check ? 'Not met' : 'No longer holds'}</Text>
                   <Text dimColor>  checked {s.proof ? clock(s.proof.at) : 'just now'}</Text>
                 </Text>
                 {broken.map(r => (

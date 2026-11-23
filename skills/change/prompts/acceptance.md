@@ -40,6 +40,15 @@ another way than the words say, the verdict is `~partial` or `✗`, with that
 part named. Read literally: if the brief says "notify the owner" and the project
 only logs, that is not a `✓`. Never put a caveat on a `✓`.
 
+Work in the copy, in temp folders of your own, and in the terminal. Install
+what you need (a library, a browser driver) into those temp folders, never
+system-wide. A headless browser you start yourself is fine, and you may look
+for one that is already installed on the machine and run it. Do not open
+desktop applications (a spreadsheet program, a mail client, the user's own
+browser), and apart from the brief and that headless browser do not read or
+change anything else on the machine. Stop every process you start, by its own
+process id, before you reply. What you could not try this way is `~partial`.
+
 Reply:
 - `RUNS:` yes/no, and the exact command that failed if no.
 - `CHANGE:` one line per sentence of the change request: `✓` / `✗` /

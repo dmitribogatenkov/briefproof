@@ -4,6 +4,33 @@ All notable changes to Briefproof. The version is the `version` field in
 `.claude-plugin/plugin.json`; `claude plugin update briefproof@briefproof` picks
 up a new one.
 
+## 0.12.0 · 2026-11-23
+
+It checks a project against a brief, whoever built it.
+
+### Added
+- **Check a project against a brief.** `/briefproof:check <brief>` takes a
+  project that already exists, whoever or whatever built it, and a brief (a
+  file, a pasted ticket, a few sentences). It copies the brief word for word,
+  quotes it into numbered requirements, and has a blind checker try each line in
+  a clean copy. Four stages, no questions, no tickets, no source file changes.
+  Each line ends as done, partly verified or "not met", with the evidence. The
+  result is a finished run, so `/briefproof:change` and the proof-drift warning
+  work on it.
+- The check's own checker prompt asks for one line per thing the brief asks,
+  with no cap on the number of lines, so a long brief is not bundled into a few
+  verdicts. Lines the checker left out, or merged into one `~partial` or `✗`,
+  go back to a fresh checker once, so each requirement gets its own verdict.
+  That second checker has its own short prompt and tries only those lines.
+
+### Changed
+- **The checker stays in the copy.** Every checker prompt now tells it not to
+  open desktop applications or touch anything outside the clean copy, to
+  install what it needs into its own temp folders, and to stop every process it
+  started. It may look for a headless browser that is already installed and run
+  it. A first real run of the check tried to open an
+  export in the Excel running on my machine and left two servers behind.
+
 ## 0.11.0 · 2026-11-18
 
 A pass means the checker saw all of it.

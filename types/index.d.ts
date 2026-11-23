@@ -22,8 +22,8 @@ export type Proof = { at: number; files: Record<string, string> }
 export type RunState = {
   /** The run's folder, relative to the project: .briefproof/runs/<id>, or .briefproof for a run from before 0.9. */
   dir?: string
-  /** A fresh build, a change request on a finished run, or an existing project adopted as a finished run. */
-  kind?: 'build' | 'change' | 'adopt'
+  /** A fresh build, a change request on a finished run, an existing project adopted as a finished run, or an existing project checked against a brief. */
+  kind?: 'build' | 'change' | 'adopt' | 'check'
   /** change: the finished run this one changes, and the request in the user's words. */
   base?: string
   request?: string

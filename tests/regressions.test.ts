@@ -292,3 +292,32 @@ test('a partly verified requirement is its own status: it needs the checker\'s w
   expect(html).toMatch(/<span class="pill partial">1 partly verified<\/span>/)
   expect(html).toMatch(/<div class="n">1\/2<\/div><div class="l">requirements verified<\/div>/)
 })
+
+test('a check holds an existing project against a brief: four stages, one gate, no tickets, and what it did not find reads "not met"', async () => {
+  let s = apply(null, { action: 'init', kind: 'check', project: 'Studio booking' }).next!
+  expect(s.stages.map(x => x.id)).toEqual(['preflight', 'manifest', 'accept', 'done'])
+  expect(Object.keys(s.gates)).toEqual(['G4'])
+  expect(() => apply(s, { action: 'stage', stage: 'spec' })).toThrow(/a check has no briefing, spec, plan or build stage/)
+  expect(() => apply(s, { action: 'gate', gate: 'G1', result: 'pass' })).toThrow(/gate is one of G4 \(a check has only the blind acceptance gate\)/)
+  s = apply(s, { action: 'add_requirements', quotes: ['clients pick a service and a time', 'every request lands in a Google Sheet', 'a client can cancel by a link'] }).next!
+  expect(() => apply(s, { action: 'add_tickets', tickets: [{ title: 'Fix it', reqs: ['R03'] }] })).toThrow(/a check has no tickets/)
+  // Nothing is asked, so nothing is confirmed first: a line goes straight from open to its verdict.
+  expect(apply(s, { action: 'check' }).reply).toBe('ok, no gate problems')
+  expect(() => apply(s, { action: 'gate', gate: 'G4', result: 'pass' })).toThrow(/G4 R01 is open/)
+  s = apply(s, { action: 'set_requirement', id: 'R01', status: 'done', files: ['src/picker.ts'], note: 'picked 10:00, saw it booked' }).next!
+  s = apply(s, { action: 'set_requirement', id: 'R02', status: 'partial', files: ['src/sheet.ts'], note: 'row written to a stubbed adapter; no live Sheet tried' }).next!
+  s = apply(s, { action: 'set_requirement', id: 'R03', status: 'broken', note: 'no cancel route: GET /cancel/abc returned 404' }).next!
+  expect(s.log.at(-1)!.msg).toBe('R03 not met: no cancel route: GET /cancel/abc returned 404')
+  s = apply(s, { action: 'gate', gate: 'G4', result: 'pass' }).next!
+  s = apply(s, { action: 'stage', stage: 'done' }).next!
+  const shown = summary(s)
+  expect(shown).toMatch(/check: the project as it is, held against the brief the user gave/)
+  expect(shown).toMatch(/not met: R03\. Offer \/briefproof:change to fix it\./)
+  expect(shown).not.toMatch(/tickets 0\/0|no longer holds/)
+  const html = reportPage(s, '')
+  expect(html).toMatch(/Check: the project as it is, held against the brief it was given/)
+  expect(html).toMatch(/<span class="pill broken">not met<\/span>/)
+  expect(html).toMatch(/<span class="pill broken">1 not met<\/span>/)
+  expect(html).toMatch(/<div class="n">1\/3<\/div><div class="l">requirements verified<\/div>/)
+  expect(html).not.toMatch(/<h2>Tickets<\/h2>|no longer hold/)
+})
